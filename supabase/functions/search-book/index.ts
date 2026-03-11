@@ -42,10 +42,13 @@ serve(async (req) => {
 
     if (dbError) throw dbError
 
-    // Se encontrou resultados, retorna
+    // Se encontrou resultados, retorna (id já é o UUID do dim_books)
     if (cachedBooks && cachedBooks.length > 0) {
       return new Response(
-        JSON.stringify({ books: cachedBooks, source: 'cache' }),
+        JSON.stringify({
+          books: cachedBooks.map(b => ({ ...b, dim_book_id: b.id })),
+          source: 'cache',
+        }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -94,17 +97,30 @@ serve(async (req) => {
           raw_data: doc,
         }
 
-        // Salva no dim_books (evita duplicatas por ISBN)
+        // Salva no dim_books (evita duplicatas por ISBN), recupera UUID real
+        let dim_book_id: string | null = null
         if (book.isbn) {
           await supabase
             .from('dim_books')
             .upsert(book, { onConflict: 'isbn', ignoreDuplicates: true })
+          const { data: found } = await supabase
+            .from('dim_books')
+            .select('id')
+            .eq('isbn', book.isbn)
+            .maybeSingle()
+          dim_book_id = found?.id ?? null
         } else {
-          await supabase.from('dim_books').insert(book)
+          const { data: inserted } = await supabase
+            .from('dim_books')
+            .insert(book)
+            .select('id')
+            .single()
+          dim_book_id = inserted?.id ?? null
         }
 
         books.push({
-          id: book.isbn || `ol-${doc.key}`,
+          id: dim_book_id || book.isbn || `ol-${doc.key}`,
+          dim_book_id,
           title: book.title,
           author: book.author,
           year: book.year,
@@ -155,16 +171,29 @@ serve(async (req) => {
         raw_data: item,
       }
 
+      let dim_book_id: string | null = null
       if (book.isbn) {
         await supabase
           .from('dim_books')
           .upsert(book, { onConflict: 'isbn', ignoreDuplicates: true })
+        const { data: found } = await supabase
+          .from('dim_books')
+          .select('id')
+          .eq('isbn', book.isbn)
+          .maybeSingle()
+        dim_book_id = found?.id ?? null
       } else {
-        await supabase.from('dim_books').insert(book)
+        const { data: inserted } = await supabase
+          .from('dim_books')
+          .insert(book)
+          .select('id')
+          .single()
+        dim_book_id = inserted?.id ?? null
       }
 
       books.push({
-        id: book.isbn || `gb-${item.id}`,
+        id: dim_book_id || book.isbn || `gb-${item.id}`,
+        dim_book_id,
         title: book.title,
         author: book.author,
         year: book.year,

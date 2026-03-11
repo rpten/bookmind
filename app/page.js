@@ -122,18 +122,19 @@ export default function BookMind() {
 
   async function saveBook(book) {
     const row = {
-      user_id: session.user.id,
-      title: book.title,
-      author: book.author,
-      year: book.year,
-      status: book.status,
-      date_read: book.dateRead || null,
-      impact: book.impact || null,
-      phrase: book.phrase || null,
-      moment: book.moment || null,
-      checkboxes: book.checkboxes || {},
+      user_id:     session.user.id,
+      title:       book.title,
+      author:      book.author,
+      year:        book.year,
+      dim_book_id: book.dim_book_id || null,
+      status:      book.status,
+      date_read:   book.dateRead || null,
+      impact:      book.impact || null,
+      phrase:      book.phrase || null,
+      moment:      book.moment || null,
+      checkboxes:  book.checkboxes || {},
       provocations: book.provocations || [],
-      themes: book.themes || [],
+      themes:      book.themes || [],
     };
     const { data, error } = await supabase.from("books").insert(row).select().single();
     if (!error && data) {
@@ -581,14 +582,15 @@ function SearchTab({ books, onSelect, onAdd }) {
 
   function handleSave() {
     onAdd({
-      title:    regBook.title,
-      author:   regBook.author,
-      year:     regBook.year,
-      status:   regStatus,
-      dateRead: regStatus === "lido" ? new Date().toISOString().split("T")[0] : null,
-      impact:   regStatus === "lido" ? (regImpact || null) : null,
-      phrase:   regPhrase  || null,
-      moment:   regMoment  || null,
+      title:       regBook.title,
+      author:      regBook.author,
+      year:        regBook.year,
+      dim_book_id: regBook.dim_book_id || null,
+      status:      regStatus,
+      dateRead:    regStatus === "lido" ? new Date().toISOString().split("T")[0] : null,
+      impact:      regStatus === "lido" ? (regImpact || null) : null,
+      phrase:      regPhrase  || null,
+      moment:      regMoment  || null,
       checkboxes:   regEmocoes.length > 0 ? { emoção: regEmocoes } : {},
       provocations: [],
       themes:       [],
@@ -630,11 +632,13 @@ function SearchTab({ books, onSelect, onAdd }) {
       const data = await response.json();
       const formattedResults = (data.books || []).map(book => ({
         id: book.id || book.isbn,
+        dim_book_id: book.dim_book_id || null,
         title: book.title,
         author: book.author,
         year: book.year?.toString() || 'N/A',
         synopsis: book.synopsis || 'Sem sinopse disponível',
         cover_url: book.cover_url,
+        isbn: book.isbn || null,
         compat: Math.floor(Math.random() * 30) + 70,
       }));
       
