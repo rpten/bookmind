@@ -95,17 +95,18 @@ export default function BookMind() {
   async function fetchBooks(userId) {
     const { data, error } = await supabase
       .from("books")
-      .select("*")
+      .select("*, dim_books(cover_url, synopsis)")
       .eq("user_id", userId)
       .order("created_at", { ascending: false });
     if (!error && data) setBooks(data.map(dbToBook));
-    
   }
 
   // ── DB helpers
   function dbToBook(row) {
     return {
       id: row.id,
+      dim_book_id: row.dim_book_id || null,
+      cover_url: row.dim_books?.cover_url || null,
       title: row.title,
       author: row.author,
       year: row.year,
@@ -141,6 +142,32 @@ export default function BookMind() {
       setBooks(prev => [dbToBook(data), ...prev]);
       notify(`"${book.title}" adicionado`);
       setTab("library");
+    }
+  }
+
+  async function updateBook(bookId, updates) {
+    const row = {
+      status:      updates.status,
+      date_read:   updates.dateRead || null,
+      impact:      updates.impact || null,
+      phrase:      updates.phrase || null,
+      moment:      updates.moment || null,
+      checkboxes:  updates.checkboxes || {},
+    };
+    const { data, error } = await supabase.from("books").update(row).eq("id", bookId).select("*, dim_books(cover_url, synopsis)").single();
+    if (!error && data) {
+      setBooks(prev => prev.map(b => b.id === bookId ? dbToBook(data) : b));
+      setSelected(null);
+      notify("Alterações salvas");
+    }
+  }
+
+  async function deleteBook(bookId) {
+    const { error } = await supabase.from("books").delete().eq("id", bookId);
+    if (!error) {
+      setBooks(prev => prev.filter(b => b.id !== bookId));
+      setSelected(null);
+      notify("Livro removido da biblioteca");
     }
   }
 
@@ -193,7 +220,7 @@ export default function BookMind() {
         ))}
       </nav>
 
-      {selected && <BookModal book={selected} onClose={() => setSelected(null)} />}
+      {selected && <BookModal book={selected} onClose={() => setSelected(null)} onUpdate={updateBook} onDelete={deleteBook} />}
 
       <style>{`
         @keyframes fadeIn  { from{opacity:0} to{opacity:1} }
@@ -514,10 +541,12 @@ function BookCard({ book, index, onClick }) {
     <div onClick={onClick} onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
       style={{ cursor:"pointer", animation:`slideUp .35s ease ${index*.06}s both`, transform:hov?"translateY(-6px) scale(1.02)":"translateY(0) scale(1)", transition:"transform .2s ease" }}>
       <div style={{ aspectRatio:"2/3", borderRadius:16, background:P.surf, border:`1px solid ${hov?P.accent:P.bdr}`, boxShadow:hov?shadowHv:shadow, transition:"border-color .2s, box-shadow .2s", position:"relative", overflow:"hidden", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:8 }}>
-        <span style={{ fontSize:22 }}>📖</span>
-        <span style={{ fontSize:8, color:P.muted, textAlign:"center", padding:"0 8px", fontFamily:mono, lineHeight:1.4 }}>{book.title.substring(0,20)}</span>
-        {book.status==="quero ler" && <div style={{ position:"absolute", top:8, right:8, background:P.bg, border:`1px solid ${P.bdr}`, borderRadius:4, padding:"2px 6px", fontSize:7, color:P.muted, fontFamily:mono }}>FILA</div>}
-        {book.impact && <div style={{ position:"absolute", bottom:8, left:8, display:"flex", gap:2 }}>{[1,2,3,4,5].map(i=><div key={i} style={{ width:4, height:4, borderRadius:"50%", background:i<=book.impact?emCor:P.bdr }}/>)}</div>}
+        {book.cover_url
+          ? <img src={book.cover_url} alt={book.title} style={{ position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover" }} />
+          : <><span style={{ fontSize:22 }}>📖</span><span style={{ fontSize:8, color:P.muted, textAlign:"center", padding:"0 8px", fontFamily:mono, lineHeight:1.4 }}>{book.title.substring(0,20)}</span></>
+        }
+        {book.status==="quero ler" && <div style={{ position:"absolute", top:8, right:8, background:P.bg, border:`1px solid ${P.bdr}`, borderRadius:4, padding:"2px 6px", fontSize:7, color:P.muted, fontFamily:mono, zIndex:1 }}>FILA</div>}
+        {book.impact && <div style={{ position:"absolute", bottom:8, left:8, display:"flex", gap:2, zIndex:1 }}>{[1,2,3,4,5].map(i=><div key={i} style={{ width:4, height:4, borderRadius:"50%", background:i<=book.impact?emCor:P.bdr }}/>)}</div>}
       </div>
       <div style={{ marginTop:8 }}>
         <div style={{ fontSize:12, fontWeight:"bold", color:P.text, lineHeight:1.3 }}>{book.title}</div>
@@ -537,7 +566,10 @@ function SmartQueue({ books, onSelect }) {
       <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
         {queue.map((book,i) => (
           <div key={book.id} onClick={()=>onSelect(book)} style={{ background:P.surf, border:`1px solid ${P.bdr}`, borderRadius:18, padding:14, display:"flex", alignItems:"center", gap:12, cursor:"pointer", boxShadow:shadow }}>
-            <div style={{ width:40, height:58, borderRadius:10, background:P.bg, border:`1px solid ${P.bdr}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>📖</div>
+            {book.cover_url
+              ? <img src={book.cover_url} alt={book.title} style={{ width:40, height:58, borderRadius:10, objectFit:"cover", flexShrink:0 }} />
+              : <div style={{ width:40, height:58, borderRadius:10, background:P.bg, border:`1px solid ${P.bdr}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, flexShrink:0 }}>📖</div>
+            }
             <div style={{ flex:1, minWidth:0 }}>
               <div style={{ fontSize:13, fontWeight:"bold", color:P.text }}>{book.title}</div>
               <div style={{ fontSize:11, color:P.muted, fontFamily:mono, marginTop:1 }}>{book.author}</div>
@@ -1035,22 +1067,138 @@ function ChatTab({ books }) {
   );
 }
 
-// ─── MODAL ────────────────────────────────────────────────────
-function BookModal({ book, onClose }) {
-  const allTags=Object.entries(book.checkboxes||{}).flatMap(([,v])=>[].concat(v||[]));
-  return(
-    <div onClick={onClose} style={{ position:"fixed",inset:0,zIndex:200,background:"rgba(47,42,36,0.65)",backdropFilter:"blur(10px)",display:"flex",alignItems:"center",justifyContent:"center",padding:20 }}>
-      <div onClick={e=>e.stopPropagation()} style={{ background:P.bg,border:`1px solid ${P.bdr}`,borderRadius:24,padding:26,maxWidth:500,width:"100%",maxHeight:"84vh",overflowY:"auto",animation:"slideUp .25s ease",boxShadow:shadowHv }}>
-        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20 }}>
-          <div><h2 style={{ fontSize:20,fontWeight:"bold",color:P.text,margin:"0 0 4px" }}>{book.title}</h2><div style={{ fontSize:11,color:P.muted,fontFamily:mono }}>{book.author} · {book.year}</div></div>
-          <button onClick={onClose} style={{ background:"transparent",border:`1px solid ${P.bdr}`,color:P.muted,width:30,height:30,borderRadius:8,cursor:"pointer",fontSize:16 }}>×</button>
+// ─── MODAL / EDIT SHEET ───────────────────────────────────────
+function BookModal({ book, onClose, onUpdate, onDelete }) {
+  const [editing, setEditing]       = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [status,  setStatus]        = useState(book.status);
+  const [impact,  setImpact]        = useState(book.impact || 0);
+  const [emocoes, setEmocoes]       = useState([].concat(book.checkboxes?.emoção || []));
+  const [phrase,  setPhrase]        = useState(book.phrase  || "");
+  const [moment,  setMoment]        = useState(book.moment  || "");
+
+  function toggleEmo(e) {
+    setEmocoes(prev => prev.includes(e) ? prev.filter(x => x !== e) : [...prev, e]);
+  }
+
+  function handleSave() {
+    onUpdate(book.id, {
+      status,
+      dateRead: status === "lido" ? (book.dateRead || new Date().toISOString().split("T")[0]) : null,
+      impact:   status === "lido" ? (impact || null) : null,
+      phrase:   phrase || null,
+      moment:   moment || null,
+      checkboxes: emocoes.length > 0 ? { emoção: emocoes } : {},
+    });
+  }
+
+  const allTags = [].concat(book.checkboxes?.emoção || []);
+
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, zIndex:200, background:"rgba(47,42,36,0.65)", backdropFilter:"blur(10px)", display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:P.bg, borderRadius:"24px 24px 0 0", padding:26, width:"100%", maxWidth:500, maxHeight:"88vh", overflowY:"auto", animation:"slideUp .25s ease", boxShadow:shadowHv }}>
+
+        {/* Handle */}
+        <div style={{ width:32, height:3, background:P.bdr, borderRadius:2, margin:"0 auto 20px" }}/>
+
+        {/* Header */}
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
+          <div style={{ flex:1, minWidth:0, paddingRight:12 }}>
+            <h2 style={{ fontSize:20, fontWeight:"bold", color:P.text, margin:"0 0 4px", lineHeight:1.2 }}>{book.title}</h2>
+            <div style={{ fontSize:11, color:P.muted, fontFamily:mono }}>{book.author}{book.year ? ` · ${book.year}` : ""}</div>
+          </div>
+          {book.cover_url && <img src={book.cover_url} alt={book.title} style={{ width:48, height:68, borderRadius:8, objectFit:"cover", flexShrink:0 }} />}
         </div>
-        {book.impact&&<div style={{ display:"flex",gap:3,marginBottom:16 }}>{[1,2,3,4,5].map(i=><span key={i} style={{ color:i<=book.impact?P.accent:P.bdr,fontSize:15 }}>★</span>)}</div>}
-        {allTags.length>0&&<div style={{ display:"flex",flexWrap:"wrap",gap:5,marginBottom:16 }}>{allTags.map((val,i)=>{const c=EMOCAO_COR[val]||P.accent;return<div key={i} style={{ background:`${c}15`,border:`1px solid ${c}30`,borderRadius:5,padding:"3px 9px",fontSize:12,color:c }}>{val}</div>;})}</div>}
-        {book.phrase&&<div style={{ borderLeft:`2px solid ${P.accent}`,paddingLeft:16,marginBottom:16,fontSize:14,color:P.sub,fontStyle:"italic",lineHeight:1.75 }}>"{book.phrase}"</div>}
-        {book.moment&&<div style={{ background:P.surf,borderRadius:10,padding:"9px 14px",marginBottom:16,fontSize:12,color:P.muted }}>📍 {book.moment}</div>}
-        {book.provocations?.filter(p=>p.a).map((p,i)=><div key={i} style={{ marginBottom:16 }}><div style={{ fontSize:13,color:P.accent,marginBottom:6,fontStyle:"italic" }}>"{p.q}"</div><div style={{ fontSize:14,color:P.sub,lineHeight:1.75 }}>{p.a}</div></div>)}
-        {book.themes?.length>0&&<div style={{ display:"flex",flexWrap:"wrap",gap:5,marginTop:8 }}>{book.themes.map(t=><div key={t} style={{ fontSize:11,color:P.muted,background:P.surf,border:`1px solid ${P.bdr}`,borderRadius:5,padding:"3px 9px" }}>{t}</div>)}</div>}
+
+        {!editing ? (
+          /* ── VIEW MODE ── */
+          <>
+            {book.impact > 0 && <div style={{ display:"flex", gap:3, marginBottom:14 }}>{[1,2,3,4,5].map(i=><span key={i} style={{ color:i<=book.impact?P.accent:P.bdr, fontSize:16 }}>★</span>)}</div>}
+            {allTags.length > 0 && (
+              <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:14 }}>
+                {allTags.map((val,i) => { const c=EMOCAO_COR[val]||P.accent; return <div key={i} style={{ background:`${c}15`, border:`1px solid ${c}30`, borderRadius:5, padding:"3px 9px", fontSize:12, color:c }}>{EMOCAO_EMOJI[val]||""} {val}</div>; })}
+              </div>
+            )}
+            {book.phrase && <div style={{ borderLeft:`2px solid ${P.accent}`, paddingLeft:16, marginBottom:14, fontSize:14, color:P.sub, fontStyle:"italic", lineHeight:1.75 }}>"{book.phrase}"</div>}
+            {book.moment && <div style={{ background:P.surf, borderRadius:10, padding:"9px 14px", marginBottom:14, fontSize:12, color:P.muted }}>📍 {book.moment}</div>}
+            {book.provocations?.filter(p=>p.a).map((p,i) => (
+              <div key={i} style={{ marginBottom:14 }}>
+                <div style={{ fontSize:13, color:P.accent, marginBottom:4, fontStyle:"italic" }}>"{p.q}"</div>
+                <div style={{ fontSize:14, color:P.sub, lineHeight:1.75 }}>{p.a}</div>
+              </div>
+            ))}
+            {book.themes?.length > 0 && <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:18 }}>{book.themes.map(t=><div key={t} style={{ fontSize:11, color:P.muted, background:P.surf, border:`1px solid ${P.bdr}`, borderRadius:5, padding:"3px 9px" }}>{t}</div>)}</div>}
+
+            <div style={{ display:"flex", gap:8, marginTop:6 }}>
+              <button onClick={() => setEditing(true)} style={{ ...btnAccent(true), flex:1, height:46 }}>Editar</button>
+              <button onClick={onClose} style={{ ...btnOutline, height:46, minWidth:80 }}>Fechar</button>
+            </div>
+
+            {/* Delete */}
+            {!confirmDel
+              ? <button onClick={() => setConfirmDel(true)} style={{ marginTop:10, width:"100%", height:38, background:"transparent", border:`1px solid rgba(180,60,60,0.3)`, borderRadius:12, color:"#b43c3c", fontSize:12, fontFamily:mono, cursor:"pointer" }}>Remover da biblioteca</button>
+              : <div style={{ marginTop:10, background:"rgba(180,60,60,0.07)", border:`1px solid rgba(180,60,60,0.25)`, borderRadius:12, padding:"12px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                  <span style={{ fontSize:13, color:"#b43c3c" }}>Confirmar remoção?</span>
+                  <div style={{ display:"flex", gap:6 }}>
+                    <button onClick={() => onDelete(book.id)} style={{ background:"#b43c3c", color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>Remover</button>
+                    <button onClick={() => setConfirmDel(false)} style={{ background:"transparent", border:`1px solid ${P.bdr}`, color:P.muted, borderRadius:8, padding:"6px 12px", cursor:"pointer", fontSize:12 }}>Cancelar</button>
+                  </div>
+                </div>
+            }
+          </>
+        ) : (
+          /* ── EDIT MODE ── */
+          <>
+            {/* Status */}
+            <div style={sectionLabel}>status</div>
+            <div style={{ display:"flex", gap:6, marginBottom:20 }}>
+              {["lido","lendo","quero ler","abandonado"].map(s => (
+                <button key={s} onClick={() => setStatus(s)} style={chip(status === s)}>{s}</button>
+              ))}
+            </div>
+
+            {/* Impacto */}
+            {status === "lido" && (
+              <div style={{ marginBottom:20 }}>
+                <div style={sectionLabel}>impacto pessoal</div>
+                <div style={{ display:"flex", gap:6 }}>
+                  {[1,2,3,4,5].map(n => (
+                    <button key={n} onClick={() => setImpact(n)} style={{ width:38, height:38, borderRadius:10, fontSize:16, cursor:"pointer", background:impact >= n ? P.accentS : "transparent", border:`1px solid ${impact >= n ? P.accent : P.bdr}`, color:impact >= n ? P.accent : P.muted, transition:"all .15s" }}>★</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Emoções */}
+            <div style={{ marginBottom:20 }}>
+              <div style={sectionLabel}>emoções evocadas</div>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                {Object.entries(EMOCAO_COR).map(([em, cor]) => (
+                  <button key={em} onClick={() => toggleEmo(em)} style={chip(emocoes.includes(em), cor)}>
+                    {EMOCAO_EMOJI[em]} {em}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Frase */}
+            <div style={{ marginBottom:14 }}>
+              <div style={sectionLabel}>frase que ficou</div>
+              <input value={phrase} onChange={e => setPhrase(e.target.value)} placeholder="Uma imagem, sensação ou frase..." style={smallInput} />
+            </div>
+
+            {/* Momento */}
+            <div style={{ marginBottom:24 }}>
+              <div style={sectionLabel}>momento de vida</div>
+              <input value={moment} onChange={e => setMoment(e.target.value)} placeholder="O que estava acontecendo quando você leu..." style={smallInput} />
+            </div>
+
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={handleSave} style={{ ...btnAccent(true), flex:1, height:50 }}>Salvar alterações ✓</button>
+              <button onClick={() => setEditing(false)} style={{ ...btnOutline, height:50, minWidth:80 }}>Cancelar</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

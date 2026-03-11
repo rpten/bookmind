@@ -97,7 +97,7 @@ serve(async (req) => {
           raw_data: doc,
         }
 
-        // Salva no dim_books (evita duplicatas por ISBN), recupera UUID real
+        // Salva no dim_books (evita duplicatas por ISBN ou título+autor)
         let dim_book_id: string | null = null
         if (book.isbn) {
           await supabase
@@ -110,12 +110,23 @@ serve(async (req) => {
             .maybeSingle()
           dim_book_id = found?.id ?? null
         } else {
-          const { data: inserted } = await supabase
+          // Sem ISBN: verifica se já existe pelo título+autor antes de inserir
+          const { data: existing } = await supabase
             .from('dim_books')
-            .insert(book)
             .select('id')
-            .single()
-          dim_book_id = inserted?.id ?? null
+            .ilike('title', book.title)
+            .ilike('author', book.author)
+            .maybeSingle()
+          if (existing) {
+            dim_book_id = existing.id
+          } else {
+            const { data: inserted } = await supabase
+              .from('dim_books')
+              .insert(book)
+              .select('id')
+              .single()
+            dim_book_id = inserted?.id ?? null
+          }
         }
 
         books.push({
@@ -183,12 +194,23 @@ serve(async (req) => {
           .maybeSingle()
         dim_book_id = found?.id ?? null
       } else {
-        const { data: inserted } = await supabase
+        // Sem ISBN: verifica se já existe pelo título+autor antes de inserir
+        const { data: existing } = await supabase
           .from('dim_books')
-          .insert(book)
           .select('id')
-          .single()
-        dim_book_id = inserted?.id ?? null
+          .ilike('title', book.title)
+          .ilike('author', book.author)
+          .maybeSingle()
+        if (existing) {
+          dim_book_id = existing.id
+        } else {
+          const { data: inserted } = await supabase
+            .from('dim_books')
+            .insert(book)
+            .select('id')
+            .single()
+          dim_book_id = inserted?.id ?? null
+        }
       }
 
       books.push({
