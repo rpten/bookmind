@@ -1,6 +1,6 @@
 // ══════════════════════════════════════════════════════════════
 // Edge Function: weekly-update
-// Atualiza catálogo semanalmente (chamada via pg_cron)
+// Seed semanal via NYT Bestsellers + enriquecimento Open Library
 // ══════════════════════════════════════════════════════════════
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
@@ -17,32 +17,83 @@ serve(async (req) => {
   }
 
   try {
+    const nytApiKey = Deno.env.get('NYT_API_KEY')
+
+    if (!nytApiKey) {
+      throw new Error('NYT_API_KEY not configured')
+    }
+
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const supabase = createClient(supabaseUrl, supabaseServiceKey)
 
-    // Por enquanto, vamos apenas registrar a execução
-    // Na produção, aqui você integraria com NYT Books API para pegar bestsellers da semana
-    // Exemplo de integração futura:
-    // const nytApiKey = Deno.env.get('NYT_API_KEY')
-    // const nytUrl = `https://api.nytimes.com/svc/books/v3/lists/current/hardcover-fiction.json?api-key=${nytApiKey}`
-    
-    const executionLog = {
-      executed_at: new Date().toISOString(),
-      status: 'success',
-      message: 'Weekly update executed successfully (placeholder)',
+    let totalAdded = 0
+    let totalErrors = 0
+
+    const lists = ['hardcover-fiction', 'hardcover-nonfiction']
+
+    for (const listName of lists) {
+      const nytUrl = `https://api.nytimes.com/svc/books/v3/lists/current/${listName}.json?api-key=${nytApiKey}`
+      const nytResponse = await fetch(nytUrl)
+      const nytData = await nytResponse.json()
+
+      if (!nytData.results?.books) {
+        console.log(`No books found for list: ${listName}`)
+        continue
+      }
+
+      for (const book of nytData.results.books) {
+        const isbn = book.primary_isbn13 || book.primary_isbn10
+
+        if (!isbn) {
+          totalErrors++
+          continue
+        }
+
+        // Enriquecer com Open Library
+        let olData = null
+        try {
+          const olResponse = await fetch(`https://openlibrary.org/isbn/${isbn}.json`)
+          olData = await olResponse.json()
+        } catch (_e) {
+          // continua sem dados da OL
+        }
+
+        const bookData = {
+          isbn,
+          title: book.title,
+          author: book.author,
+          year: book.year_published || null,
+          synopsis: book.description || (typeof olData?.description === 'string' ? olData.description : null),
+          cover_url: olData?.covers?.[0]
+            ? `https://covers.openlibrary.org/b/id/${olData.covers[0]}-L.jpg`
+            : null,
+          genres: olData?.subjects?.slice(0, 5) || [],
+          language: 'en',
+          source: 'nyt_bestseller',
+          raw_data: { nyt: book, openlibrary: olData },
+        }
+
+        const { error } = await supabase
+          .from('dim_books')
+          .upsert(bookData, { onConflict: 'isbn', ignoreDuplicates: false })
+
+        if (error) {
+          console.error(`Error upserting book ${isbn}:`, error)
+          totalErrors++
+        } else {
+          totalAdded++
+        }
+      }
     }
 
-    console.log('Weekly update executed:', executionLog)
-
-    // Aqui você pode adicionar lógica para:
-    // 1. Chamar NYT API
-    // 2. Extrair ISBNs novos
-    // 3. Buscar cada um na Open Library
-    // 4. Inserir em dim_books
-
     return new Response(
-      JSON.stringify(executionLog),
+      JSON.stringify({
+        success: true,
+        added: totalAdded,
+        errors: totalErrors,
+        lists_processed: lists.length,
+      }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 

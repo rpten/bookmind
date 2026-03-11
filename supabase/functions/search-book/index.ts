@@ -1,6 +1,7 @@
 // ══════════════════════════════════════════════════════════════
 // Edge Function: search-book
-// Busca livros em dim_books. Se não encontrar, consulta Open Library.
+// Busca livros em dim_books. Se não encontrar, consulta Open Library
+// (com ratings) e Google Books como fallback.
 // ══════════════════════════════════════════════════════════════
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
@@ -19,7 +20,7 @@ serve(async (req) => {
 
   try {
     const { query } = await req.json()
-    
+
     if (!query || query.trim().length < 2) {
       return new Response(
         JSON.stringify({ error: 'Query must be at least 2 characters' }),
@@ -35,7 +36,7 @@ serve(async (req) => {
     // 1. Busca em dim_books primeiro
     const { data: cachedBooks, error: dbError } = await supabase
       .from('dim_books')
-      .select('id, title, author, year, synopsis, cover_url, isbn')
+      .select('id, title, author, year, synopsis, cover_url, isbn, avg_rating, ratings_count')
       .or(`title.ilike.%${query}%,author.ilike.%${query}%`)
       .limit(10)
 
@@ -54,55 +55,129 @@ serve(async (req) => {
     const olResponse = await fetch(openLibraryUrl)
     const olData = await olResponse.json()
 
-    if (!olData.docs || olData.docs.length === 0) {
+    if (olData.docs && olData.docs.length > 0) {
+      // 3. Processa e salva resultados da Open Library
+      const books = []
+      for (const doc of olData.docs.slice(0, 10)) {
+        // Buscar ratings do Open Library
+        let avg_rating = null
+        let ratings_count = null
+
+        if (doc.key) {
+          try {
+            const ratingsResponse = await fetch(`https://openlibrary.org${doc.key}/ratings.json`)
+            const ratingsData = await ratingsResponse.json()
+            if (ratingsData.summary) {
+              avg_rating = ratingsData.summary.average ?? null
+              ratings_count = ratingsData.summary.count ?? null
+            }
+          } catch (_e) {
+            // continua sem ratings
+          }
+        }
+
+        const book = {
+          isbn: doc.isbn?.[0] || null,
+          title: doc.title || 'Sem título',
+          author: doc.author_name?.[0] || 'Autor desconhecido',
+          year: doc.first_publish_year || null,
+          synopsis: doc.first_sentence?.[0] || null,
+          cover_url: doc.cover_i
+            ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`
+            : null,
+          genres: doc.subject?.slice(0, 5) || [],
+          language: doc.language?.[0] || 'en',
+          page_count: doc.number_of_pages_median || null,
+          avg_rating,
+          ratings_count,
+          source: 'open_library',
+          raw_data: doc,
+        }
+
+        // Salva no dim_books (evita duplicatas por ISBN)
+        if (book.isbn) {
+          await supabase
+            .from('dim_books')
+            .upsert(book, { onConflict: 'isbn', ignoreDuplicates: true })
+        } else {
+          await supabase.from('dim_books').insert(book)
+        }
+
+        books.push({
+          id: book.isbn || `ol-${doc.key}`,
+          title: book.title,
+          author: book.author,
+          year: book.year,
+          synopsis: book.synopsis,
+          cover_url: book.cover_url,
+          isbn: book.isbn,
+          avg_rating: book.avg_rating,
+          ratings_count: book.ratings_count,
+        })
+      }
+
       return new Response(
-        JSON.stringify({ books: [], source: 'open_library' }),
+        JSON.stringify({ books, source: 'open_library' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // 3. Processa e salva resultados da Open Library
+    // 4. Fallback: Google Books
+    const gbResponse = await fetch(
+      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=10`
+    )
+    const gbData = await gbResponse.json()
+
+    if (!gbData.items || gbData.items.length === 0) {
+      return new Response(
+        JSON.stringify({ books: [], source: 'google_books' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
     const books = []
-    for (const doc of olData.docs.slice(0, 10)) {
+    for (const item of gbData.items) {
+      const v = item.volumeInfo
+
       const book = {
-        isbn: doc.isbn?.[0] || null,
-        title: doc.title || 'Sem título',
-        author: doc.author_name?.[0] || 'Autor desconhecido',
-        year: doc.first_publish_year || null,
-        synopsis: doc.first_sentence?.[0] || null,
-        cover_url: doc.cover_i 
-          ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`
-          : null,
-        genres: doc.subject?.slice(0, 5) || [],
-        language: doc.language?.[0] || 'en',
-        page_count: doc.number_of_pages_median || null,
-        source: 'open_library',
-        raw_data: doc,
+        isbn: v.industryIdentifiers?.find((id: { type: string }) => id.type === 'ISBN_13')?.identifier || null,
+        title: v.title || 'Sem título',
+        author: v.authors?.[0] || 'Autor desconhecido',
+        year: v.publishedDate ? parseInt(v.publishedDate.substring(0, 4)) : null,
+        synopsis: v.description || null,
+        cover_url: v.imageLinks?.thumbnail?.replace('http:', 'https:') || null,
+        genres: v.categories || [],
+        language: v.language || 'en',
+        page_count: v.pageCount || null,
+        avg_rating: v.averageRating || null,
+        ratings_count: v.ratingsCount || null,
+        source: 'google_books',
+        raw_data: item,
       }
 
-      // Salva no dim_books (evita duplicatas por ISBN)
       if (book.isbn) {
         await supabase
           .from('dim_books')
           .upsert(book, { onConflict: 'isbn', ignoreDuplicates: true })
       } else {
-        // Se não tem ISBN, insere direto (pode gerar duplicatas, mas é raro)
         await supabase.from('dim_books').insert(book)
       }
 
       books.push({
-        id: book.isbn || `ol-${doc.key}`,
+        id: book.isbn || `gb-${item.id}`,
         title: book.title,
         author: book.author,
         year: book.year,
         synopsis: book.synopsis,
         cover_url: book.cover_url,
         isbn: book.isbn,
+        avg_rating: book.avg_rating,
+        ratings_count: book.ratings_count,
       })
     }
 
     return new Response(
-      JSON.stringify({ books, source: 'open_library' }),
+      JSON.stringify({ books, source: 'google_books' }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 
