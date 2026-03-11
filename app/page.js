@@ -863,39 +863,86 @@ function ProfileTab({ books, onSignOut }) {
 
 // ─── CHAT ─────────────────────────────────────────────────────
 function ChatTab({ books }) {
-  const [msgs,setMsgs]=useState([{role:"ai",text:"Olá. Sou sua IA literária. Posso analisar seus padrões de leitura, comparar livros, sugerir o próximo da fila ou responder qualquer pergunta sobre sua biblioteca."}]);
-  const [input,setInput]=useState("");const [loading,setLoading]=useState(false);const endRef=useRef(null);
-  useEffect(()=>{endRef.current?.scrollIntoView({behavior:"smooth"});},[msgs]);
-  const QUICK=["Que tipo de história mais mexe comigo?","Qual livro da fila faz mais sentido agora?","Quais emoções aparecem nos livros que mais amei?"];
-  function send(text){
-    const t=(text||input).trim();if(!t)return;
-    setMsgs(prev=>[...prev,{role:"user",text:t}]);setInput("");setLoading(true);
-    const lidos=books.filter(b=>b.status==="lido");
-    const topEm=[].concat(lidos[0]?.checkboxes?.emocao||[])[0]||"melancolia";
-    setTimeout(()=>{
-      let resp="";
-      const q=t.toLowerCase();
-      if(q.includes("tipo")||q.includes("mexe"))resp=`Com base nos seus ${lidos.length} livros, você busca narrativas com personagens psicologicamente complexos. A emoção "${topEm}" aparece com frequência.`;
-      else if(q.includes("fila")){const fila=books.filter(b=>b.status==="quero ler");resp=fila.length>0?`Sua fila tem ${fila.length} livro(s). Eu priorizaria "${fila[0].title}".`:"Sua fila está vazia.";}
-      else if(q.includes("emoç"))resp=`"${topEm}" é a emoção mais recorrente nos seus livros de maior impacto.`;
-      else resp=`Com ${lidos.length} livros no histórico, percebo preferência por narrativas com profundidade. Registre mais para eu refinar a análise.`;
-      setMsgs(prev=>[...prev,{role:"ai",text:resp}]);setLoading(false);
-    },900);
+  const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const AI_CHAT_URL = 'https://fqwugqengnenliyouojj.supabase.co/functions/v1/ai-chat';
+
+  const [msgs, setMsgs] = useState([{ role: "ai", text: "Olá. Sou sua IA literária. Posso analisar seus padrões de leitura, comparar livros, sugerir o próximo da fila ou responder qualquer pergunta sobre sua biblioteca.", recs: [] }]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const endRef = useRef(null);
+
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs]);
+
+  const QUICK = ["Que tipo de história mais mexe comigo?", "Qual livro da fila faz mais sentido agora?", "Me recomenda um livro parecido com o que mais amei"];
+
+  async function send(text) {
+    const t = (text || input).trim();
+    if (!t) return;
+    const newMsgs = [...msgs, { role: "user", text: t, recs: [] }];
+    setMsgs(newMsgs);
+    setInput("");
+    setLoading(true);
+    try {
+      const res = await fetch(AI_CHAT_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${ANON_KEY}`,
+          'apikey': ANON_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: t,
+          user_library: books,
+          conversation_history: msgs,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro na resposta');
+      setMsgs(prev => [...prev, { role: "ai", text: data.response, recs: data.recommendations || [] }]);
+    } catch (err) {
+      setMsgs(prev => [...prev, { role: "ai", text: "Desculpe, ocorreu um erro. Tente novamente.", recs: [] }]);
+      console.error('ai-chat error:', err);
+    } finally {
+      setLoading(false);
+    }
   }
-  return(
-    <div style={{ padding:"24px 20px",maxWidth:560,margin:"0 auto",display:"flex",flexDirection:"column",height:"calc(100vh - 140px)" }}>
-      <h1 style={{ fontSize:24,fontWeight:"bold",color:P.text,marginBottom:18 }}>Conversar</h1>
-      <div style={{ display:"flex",flexWrap:"wrap",gap:6,marginBottom:18 }}>
-        {QUICK.map(q=><button key={q} onClick={()=>send(q)} style={{ background:"transparent",border:`1px solid ${P.bdr}`,color:P.muted,padding:"6px 12px",borderRadius:8,cursor:"pointer",fontSize:12,fontFamily:serif }}>{q}</button>)}
+
+  return (
+    <div style={{ padding: "24px 20px", maxWidth: 560, margin: "0 auto", display: "flex", flexDirection: "column", height: "calc(100vh - 140px)" }}>
+      <h1 style={{ fontSize: 24, fontWeight: "bold", color: P.text, marginBottom: 18 }}>Conversar</h1>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 18 }}>
+        {QUICK.map(q => <button key={q} onClick={() => send(q)} style={{ background: "transparent", border: `1px solid ${P.bdr}`, color: P.muted, padding: "6px 12px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontFamily: serif }}>{q}</button>)}
       </div>
-      <div style={{ flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:10,marginBottom:14 }}>
-        {msgs.map((m,i)=><div key={i} style={{ display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start" }}><div style={{ maxWidth:"82%",background:m.role==="user"?P.accentS:P.surf,border:`1px solid ${m.role==="user"?P.accentM:P.bdr}`,borderRadius:m.role==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",padding:"12px 16px",fontSize:14,color:P.text,lineHeight:1.75,fontFamily:serif }}>{m.text}</div></div>)}
-        {loading&&<div style={{ display:"flex",gap:5,padding:"8px 15px" }}>{[0,1,2].map(i=><div key={i} style={{ width:6,height:6,borderRadius:"50%",background:P.accent,animation:`pulse 1s ${i*.2}s infinite` }}/>)}</div>}
-        <div ref={endRef}/>
+      <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
+        {msgs.map((m, i) => (
+          <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start", gap: 8 }}>
+            <div style={{ maxWidth: "82%", background: m.role === "user" ? P.accentS : P.surf, border: `1px solid ${m.role === "user" ? P.accentM : P.bdr}`, borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", padding: "12px 16px", fontSize: 14, color: P.text, lineHeight: 1.75, fontFamily: serif }}>
+              {m.text}
+            </div>
+            {m.recs?.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, width: "100%", maxWidth: "90%" }}>
+                {m.recs.slice(0, 3).map((r, j) => (
+                  <div key={j} style={{ background: P.surf, border: `1px solid ${P.bdr}`, borderRadius: 10, padding: "10px 14px", display: "flex", gap: 10, alignItems: "center" }}>
+                    {r.cover_url
+                      ? <img src={r.cover_url} alt={r.title} style={{ width: 32, height: 46, borderRadius: 5, objectFit: "cover", flexShrink: 0 }} />
+                      : <div style={{ width: 32, height: 46, borderRadius: 5, background: P.bg, border: `1px solid ${P.bdr}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, flexShrink: 0 }}>📖</div>
+                    }
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: "bold", color: P.text }}>{r.title}</div>
+                      <div style={{ fontSize: 11, color: P.muted, fontFamily: mono }}>{r.author}{r.avg_rating ? ` · ${r.avg_rating}★` : ''}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        {loading && <div style={{ display: "flex", gap: 5, padding: "8px 15px" }}>{[0, 1, 2].map(i => <div key={i} style={{ width: 6, height: 6, borderRadius: "50%", background: P.accent, animation: `pulse 1s ${i * .2}s infinite` }} />)}</div>}
+        <div ref={endRef} />
       </div>
-      <div style={{ display:"flex",gap:8 }}>
-        <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder="Pergunte sobre sua biblioteca..." style={{...smallInput,flex:1}}/>
-        <button onClick={()=>send()} disabled={loading||!input.trim()} style={{ ...btnAccent(false),opacity:(loading||!input.trim())?.5:1,minWidth:44,padding:"12px 16px" }}>→</button>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} placeholder="Pergunte sobre sua biblioteca..." style={{ ...smallInput, flex: 1 }} />
+        <button onClick={() => send()} disabled={loading || !input.trim()} style={{ ...btnAccent(false), opacity: (loading || !input.trim()) ? .5 : 1, minWidth: 44, padding: "12px 16px" }}>→</button>
       </div>
     </div>
   );
