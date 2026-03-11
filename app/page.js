@@ -99,6 +99,7 @@ export default function BookMind() {
       .eq("user_id", userId)
       .order("created_at", { ascending: false });
     if (!error && data) setBooks(data.map(dbToBook));
+    
   }
 
   // ── DB helpers
@@ -176,7 +177,7 @@ export default function BookMind() {
 
       <main style={{ paddingTop:54, paddingBottom:92 }}>
         {tab==="library"  && <LibraryTab books={books} sortBy={sortBy} setSortBy={setSortBy} filter={filter} setFilter={setFilter} onSelect={setSelected} />}
-        {tab==="search"   && <SearchTab books={books} onSelect={setSelected} />}
+        {tab==="search"   && <SearchTab books={books} onSelect={setSelected} onAdd={saveBook} />}
         {tab==="register" && <RegisterTab onAdd={saveBook} />}
         {tab==="profile"  && <ProfileTab books={books} onSignOut={() => supabase.auth.signOut()} />}
         {tab==="chat"     && <ChatTab books={books} />}
@@ -550,24 +551,84 @@ function SmartQueue({ books, onSelect }) {
 }
 
 // ─── PESQUISA ─────────────────────────────────────────────────
-function SearchTab({ books, onSelect }) {
+function SearchTab({ books, onSelect, onAdd }) {
   const [query, setQuery]   = useState("");
   const [results, setResults] = useState([]);
   const [sheet, setSheet]   = useState(null);
+  const [searchLoading, setSearchLoading] = useState(false);
 
-  const ALL_BOOKS = [
-    {id:"s1",title:"Norwegian Wood",author:"Haruki Murakami",year:"1987",synopsis:"Uma história de amor e perda no Japão dos anos 60.",compat:91},
-    {id:"s2",title:"American Gods",author:"Neil Gaiman",year:"2001",synopsis:"Um ex-presidiário entra num embate entre deuses antigos e modernos.",compat:84},
-    {id:"s3",title:"O Processo",author:"Franz Kafka",year:"1925",synopsis:"Josef K. é preso sem motivo aparente.",compat:78},
-    {id:"s4",title:"Beloved",author:"Toni Morrison",year:"1987",synopsis:"Uma ex-escravizada é assombrada pelo fantasma de sua filha.",compat:88},
-    {id:"s5",title:"Siddhartha",author:"Hermann Hesse",year:"1922",synopsis:"A jornada espiritual de um homem em busca de iluminação.",compat:82},
-  ];
+  function handleAddBook(status) {
+    onAdd({
+      title: sheet.title,
+      author: sheet.author,
+      year: sheet.year,
+      status,
+      dateRead: status === "lido" ? new Date().toISOString().split("T")[0] : null,
+      impact: null,
+      phrase: null,
+      moment: null,
+      checkboxes: {},
+      provocations: [],
+      themes: [],
+    });
+    setSheet(null);
+  }
 
-  useEffect(() => {
-    if (!query.trim()) { setResults([]); return; }
-    const t = setTimeout(() => setResults(ALL_BOOKS.filter(b => b.title.toLowerCase().includes(query.toLowerCase()) || b.author.toLowerCase().includes(query.toLowerCase()))), 300);
-    return () => clearTimeout(t);
-  }, [query]);
+ useEffect(() => {
+  console.log('ANON_KEY:', process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+  
+  if (!query.trim()) { 
+    setResults([]); 
+    return; 
+  }
+  
+  
+  const timer = setTimeout(async () => {
+    setSearchLoading(true);
+    try {
+      console.log('Headers sendo enviados:', {
+        'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
+        'apikey': process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+        'Content-Type': 'application/json',
+      });
+      
+      const response = await fetch(
+        'https://fqwugqengnenliyouojj.supabase.co/functions/v1/search-book',
+        {
+          method: 'POST',
+          headers: {
+          'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
+          'apikey': process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+},
+          body: JSON.stringify({ query }),
+        }
+      );
+
+      const data = await response.json();
+      const formattedResults = (data.books || []).map(book => ({
+        id: book.id || book.isbn,
+        title: book.title,
+        author: book.author,
+        year: book.year?.toString() || 'N/A',
+        synopsis: book.synopsis || 'Sem sinopse disponível',
+        cover_url: book.cover_url,
+        compat: Math.floor(Math.random() * 30) + 70,
+      }));
+      
+      setResults(formattedResults);
+
+      setResults(formattedResults);
+    } catch (error) {
+      console.error('Erro ao buscar livros:', error);
+      setResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  }, 400);
+
+  return () => clearTimeout(timer);
+}, [query]);
 
   return (
     <div style={{ padding:"24px 20px", maxWidth:430, margin:"0 auto" }}>
@@ -577,13 +638,23 @@ function SearchTab({ books, onSelect }) {
         {query && <button onClick={()=>{setQuery("");setResults([]);}} style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", background:"transparent", border:"none", cursor:"pointer", fontSize:16, color:P.muted }}>×</button>}
       </div>
 
+{searchLoading && (
+  <div style={{ textAlign:"center", padding:"20px 0", color:P.muted, fontFamily:mono, fontSize:12 }}>
+    buscando...
+  </div>
+)}
+
       {!query && (
         <div style={{ textAlign:"center", padding:"40px 0", color:P.muted, fontFamily:mono, fontSize:12 }}>Digite para buscar livros</div>
       )}
 
       {results.map((book,i) => (
         <div key={book.id} onClick={()=>setSheet(book)} style={{ display:"flex", alignItems:"center", gap:14, padding:"13px 0", borderBottom:`1px solid ${P.bdr}`, cursor:"pointer" }}>
-          <div style={{ width:42, height:60, borderRadius:10, background:P.surf, border:`1px solid ${P.bdr}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>📖</div>
+          {book.cover_url ? (
+            <img src={book.cover_url} alt={book.title} style={{ width:42, height:60, borderRadius:10, objectFit:"cover", flexShrink:0 }} />
+          ) : (
+            <div style={{ width:42, height:60, borderRadius:10, background:P.surf, border:`1px solid ${P.bdr}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>📖</div>
+          )}
           <div style={{ flex:1 }}>
             <div style={{ fontSize:14, fontWeight:"bold", color:P.text }}>{book.title}</div>
             <div style={{ fontSize:11, color:P.muted, fontFamily:mono, marginTop:2 }}>{book.author} · {book.year}</div>
@@ -600,8 +671,8 @@ function SearchTab({ books, onSelect }) {
             <div style={{ fontSize:11, color:P.muted, fontFamily:mono, marginBottom:14 }}>{sheet.author} · {sheet.year}</div>
             <div style={{ fontSize:14, color:P.sub, lineHeight:1.7, marginBottom:20 }}>{sheet.synopsis}</div>
             <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-              <button style={{ ...btnAccent(true), height:48 }}>Adicionar à biblioteca</button>
-              <button style={{ ...btnOutline, width:"100%", height:48, textAlign:"center" }}>Adicionar à fila</button>
+              <button onClick={() => handleAddBook("lido")} style={{ ...btnAccent(true), height:48 }}>Adicionar à biblioteca</button>
+              <button onClick={() => handleAddBook("quero ler")} style={{ ...btnOutline, width:"100%", height:48, textAlign:"center" }}>Adicionar à fila</button>
             </div>
           </div>
         </div>
