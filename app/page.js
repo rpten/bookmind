@@ -95,7 +95,7 @@ export default function BookMind() {
   async function fetchBooks(userId) {
     const { data, error } = await supabase
       .from("books")
-      .select("*, dim_books(cover_url, synopsis)")
+      .select("*, dim_books(cover_url, synopsis, genres, avg_rating, ratings_count)")
       .eq("user_id", userId)
       .order("created_at", { ascending: false });
     if (!error && data) setBooks(data.map(dbToBook));
@@ -107,6 +107,10 @@ export default function BookMind() {
       id: row.id,
       dim_book_id: row.dim_book_id || null,
       cover_url: row.dim_books?.cover_url || null,
+      synopsis: row.dim_books?.synopsis || null,
+      genres: row.dim_books?.genres || [],
+      avg_rating: row.dim_books?.avg_rating || null,
+      ratings_count: row.dim_books?.ratings_count || null,
       title: row.title,
       author: row.author,
       year: row.year,
@@ -154,7 +158,7 @@ export default function BookMind() {
       moment:      updates.moment || null,
       checkboxes:  updates.checkboxes || {},
     };
-    const { data, error } = await supabase.from("books").update(row).eq("id", bookId).select("*, dim_books(cover_url, synopsis)").single();
+    const { data, error } = await supabase.from("books").update(row).eq("id", bookId).select("*, dim_books(cover_url, synopsis, genres, avg_rating, ratings_count)").single();
     if (!error && data) {
       setBooks(prev => prev.map(b => b.id === bookId ? dbToBook(data) : b));
       setSelected(null);
@@ -220,7 +224,7 @@ export default function BookMind() {
         ))}
       </nav>
 
-      {selected && <BookModal book={selected} onClose={() => setSelected(null)} onUpdate={updateBook} onDelete={deleteBook} />}
+      {selected && <BookModal book={selected} userLibrary={books} onClose={() => setSelected(null)} onAdd={saveBook} onUpdate={updateBook} onDelete={deleteBook} />}
 
       <style>{`
         @keyframes fadeIn  { from{opacity:0} to{opacity:1} }
@@ -1097,23 +1101,26 @@ function ChatTab({ books }) {
 }
 
 // ─── MODAL / EDIT SHEET ───────────────────────────────────────
-function BookModal({ book, onClose, onUpdate, onDelete }) {
+function BookModal({ book, userLibrary, onClose, onAdd, onUpdate, onDelete }) {
+  const inLib = userLibrary?.find(b => b.dim_book_id && b.dim_book_id === book.dim_book_id);
+  const libBook = inLib || book;
+
   const [editing, setEditing]       = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
-  const [status,  setStatus]        = useState(book.status);
-  const [impact,  setImpact]        = useState(book.impact || 0);
-  const [emocoes, setEmocoes]       = useState([].concat(book.checkboxes?.emoção || []));
-  const [phrase,  setPhrase]        = useState(book.phrase  || "");
-  const [moment,  setMoment]        = useState(book.moment  || "");
+  const [status,  setStatus]        = useState(libBook.status || "lendo");
+  const [impact,  setImpact]        = useState(libBook.impact || 0);
+  const [emocoes, setEmocoes]       = useState([].concat(libBook.checkboxes?.emoção || []));
+  const [phrase,  setPhrase]        = useState(libBook.phrase  || "");
+  const [moment,  setMoment]        = useState(libBook.moment  || "");
 
   function toggleEmo(e) {
     setEmocoes(prev => prev.includes(e) ? prev.filter(x => x !== e) : [...prev, e]);
   }
 
   function handleSave() {
-    onUpdate(book.id, {
+    onUpdate(inLib.id, {
       status,
-      dateRead: status === "lido" ? (book.dateRead || new Date().toISOString().split("T")[0]) : null,
+      dateRead: status === "lido" ? (libBook.dateRead || new Date().toISOString().split("T")[0]) : null,
       impact:   status === "lido" ? (impact || null) : null,
       phrase:   phrase || null,
       moment:   moment || null,
@@ -1121,113 +1128,171 @@ function BookModal({ book, onClose, onUpdate, onDelete }) {
     });
   }
 
-  const allTags = [].concat(book.checkboxes?.emoção || []);
+  const [showFullSynopsis, setShowFullSynopsis] = useState(false);
+
+  const fmtRatings = n => n?.toLocaleString("pt-BR");
+  const allTags    = [].concat(libBook.checkboxes?.emoção || []);
+  const genres     = book.genres || [];
+  const rawSynopsis = book.synopsis || null;
+  const synopsis   = rawSynopsis && !showFullSynopsis && rawSynopsis.length > 300
+    ? rawSynopsis.slice(0, 300).trimEnd() + "…"
+    : rawSynopsis;
+  const avgRating  = book.avg_rating || null;
+  const ratingsCount = book.ratings_count || null;
 
   return (
     <div onClick={onClose} style={{ position:"fixed", inset:0, zIndex:200, background:"rgba(47,42,36,0.65)", backdropFilter:"blur(10px)", display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
-      <div onClick={e=>e.stopPropagation()} style={{ background:P.bg, borderRadius:"24px 24px 0 0", padding:26, width:"100%", maxWidth:500, maxHeight:"88vh", overflowY:"auto", animation:"slideUp .25s ease", boxShadow:shadowHv }}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:P.bg, borderRadius:"24px 24px 0 0", width:"100%", maxWidth:500, maxHeight:"90vh", overflowY:"auto", animation:"slideUp .25s ease", boxShadow:shadowHv }}>
 
-        {/* Handle */}
-        <div style={{ width:32, height:3, background:P.bdr, borderRadius:2, margin:"0 auto 20px" }}/>
-
-        {/* Header */}
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
-          <div style={{ flex:1, minWidth:0, paddingRight:12 }}>
-            <h2 style={{ fontSize:20, fontWeight:"bold", color:P.text, margin:"0 0 4px", lineHeight:1.2 }}>{book.title}</h2>
-            <div style={{ fontSize:11, color:P.muted, fontFamily:mono }}>{book.author}{book.year ? ` · ${book.year}` : ""}</div>
+        {/* Cover */}
+        {book.cover_url ? (
+          <div style={{ position:"relative", height:220, flexShrink:0 }}>
+            <img src={book.cover_url} alt={book.title} style={{ width:"100%", height:"100%", objectFit:"cover", borderRadius:"24px 24px 0 0" }} />
+            <div style={{ position:"absolute", inset:0, background:"linear-gradient(to bottom, transparent 40%, rgba(47,42,36,0.88) 100%)", borderRadius:"24px 24px 0 0" }} />
+            <button onClick={onClose} style={{ position:"absolute", top:14, right:14, width:32, height:32, borderRadius:"50%", background:"rgba(47,42,36,0.5)", border:"none", color:"#fff", fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 }}>×</button>
           </div>
-          {book.cover_url && <img src={book.cover_url} alt={book.title} style={{ width:48, height:68, borderRadius:8, objectFit:"cover", flexShrink:0 }} />}
-        </div>
-
-        {!editing ? (
-          /* ── VIEW MODE ── */
-          <>
-            {book.impact > 0 && <div style={{ display:"flex", gap:3, marginBottom:14 }}>{[1,2,3,4,5].map(i=><span key={i} style={{ color:i<=book.impact?P.accent:P.bdr, fontSize:16 }}>★</span>)}</div>}
-            {allTags.length > 0 && (
-              <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:14 }}>
-                {allTags.map((val,i) => { const c=EMOCAO_COR[val]||P.accent; return <div key={i} style={{ background:`${c}15`, border:`1px solid ${c}30`, borderRadius:5, padding:"3px 9px", fontSize:12, color:c }}>{EMOCAO_EMOJI[val]||""} {val}</div>; })}
-              </div>
-            )}
-            {book.phrase && <div style={{ borderLeft:`2px solid ${P.accent}`, paddingLeft:16, marginBottom:14, fontSize:14, color:P.sub, fontStyle:"italic", lineHeight:1.75 }}>"{book.phrase}"</div>}
-            {book.moment && <div style={{ background:P.surf, borderRadius:10, padding:"9px 14px", marginBottom:14, fontSize:12, color:P.muted }}>📍 {book.moment}</div>}
-            {book.provocations?.filter(p=>p.a).map((p,i) => (
-              <div key={i} style={{ marginBottom:14 }}>
-                <div style={{ fontSize:13, color:P.accent, marginBottom:4, fontStyle:"italic" }}>"{p.q}"</div>
-                <div style={{ fontSize:14, color:P.sub, lineHeight:1.75 }}>{p.a}</div>
-              </div>
-            ))}
-            {book.themes?.length > 0 && <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:18 }}>{book.themes.map(t=><div key={t} style={{ fontSize:11, color:P.muted, background:P.surf, border:`1px solid ${P.bdr}`, borderRadius:5, padding:"3px 9px" }}>{t}</div>)}</div>}
-
-            <div style={{ display:"flex", gap:8, marginTop:6 }}>
-              <button onClick={() => setEditing(true)} style={{ ...btnAccent(true), flex:1, height:46 }}>Editar</button>
-              <button onClick={onClose} style={{ ...btnOutline, height:46, minWidth:80 }}>Fechar</button>
-            </div>
-
-            {/* Delete */}
-            {!confirmDel
-              ? <button onClick={() => setConfirmDel(true)} style={{ marginTop:10, width:"100%", height:38, background:"transparent", border:`1px solid rgba(180,60,60,0.3)`, borderRadius:12, color:"#b43c3c", fontSize:12, fontFamily:mono, cursor:"pointer" }}>Remover da biblioteca</button>
-              : <div style={{ marginTop:10, background:"rgba(180,60,60,0.07)", border:`1px solid rgba(180,60,60,0.25)`, borderRadius:12, padding:"12px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
-                  <span style={{ fontSize:13, color:"#b43c3c" }}>Confirmar remoção?</span>
-                  <div style={{ display:"flex", gap:6 }}>
-                    <button onClick={() => onDelete(book.id)} style={{ background:"#b43c3c", color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>Remover</button>
-                    <button onClick={() => setConfirmDel(false)} style={{ background:"transparent", border:`1px solid ${P.bdr}`, color:P.muted, borderRadius:8, padding:"6px 12px", cursor:"pointer", fontSize:12 }}>Cancelar</button>
-                  </div>
-                </div>
-            }
-          </>
         ) : (
-          /* ── EDIT MODE ── */
-          <>
-            {/* Status */}
-            <div style={sectionLabel}>status</div>
-            <div style={{ display:"flex", gap:6, marginBottom:20 }}>
-              {["lido","lendo","quero ler","abandonado"].map(s => (
-                <button key={s} onClick={() => setStatus(s)} style={chip(status === s)}>{s}</button>
+          <div style={{ position:"relative", height:60, background:P.surf, borderRadius:"24px 24px 0 0" }}>
+            <div style={{ width:32, height:3, background:P.bdr, borderRadius:2, position:"absolute", top:18, left:"50%", transform:"translateX(-50%)" }} />
+            <button onClick={onClose} style={{ position:"absolute", top:14, right:14, width:32, height:32, borderRadius:"50%", background:P.surf, border:`1px solid ${P.bdr}`, color:P.muted, fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 }}>×</button>
+          </div>
+        )}
+
+        <div style={{ padding:"20px 24px 32px" }}>
+
+          {/* Title + author */}
+          <h2 style={{ fontSize:22, fontWeight:"bold", color:P.text, margin:"0 0 4px", lineHeight:1.2 }}>{book.title}</h2>
+          <div style={{ fontSize:12, color:P.muted, fontFamily:mono, marginBottom:12 }}>{book.author}{book.year ? ` · ${book.year}` : ""}</div>
+
+          {/* Catalog ratings */}
+          {avgRating && (
+            <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:12 }}>
+              <div style={{ display:"flex", gap:2 }}>
+                {[1,2,3,4,5].map(i => <span key={i} style={{ color:i <= Math.round(avgRating) ? P.accent : P.bdr, fontSize:18 }}>★</span>)}
+              </div>
+              <span style={{ fontSize:12, color:P.muted, fontFamily:mono }}>
+                {avgRating.toFixed(1)}{ratingsCount ? ` · ${fmtRatings(ratingsCount)} avaliações` : ""}
+              </span>
+            </div>
+          )}
+
+          {/* Genre chips */}
+          {genres.length > 0 && (
+            <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:14 }}>
+              {genres.slice(0, 5).map((g, i) => (
+                <div key={i} style={{ background:P.surf, border:`1px solid ${P.bdr}`, borderRadius:5, padding:"3px 9px", fontSize:11, color:P.muted, fontFamily:mono }}>{g}</div>
               ))}
             </div>
+          )}
 
-            {/* Impacto */}
-            {status === "lido" && (
+          {/* Synopsis */}
+          {synopsis && (
+            <div style={{ marginBottom:18 }}>
+              <p style={{ fontSize:13, color:P.sub, lineHeight:1.75, margin:0 }}>{synopsis}</p>
+              {rawSynopsis.length > 300 && (
+                <button onClick={() => setShowFullSynopsis(v => !v)} style={{ background:"none", border:"none", color:P.accent, fontSize:12, fontFamily:mono, cursor:"pointer", padding:"4px 0 0", display:"block" }}>
+                  {showFullSynopsis ? "Ver menos" : "Ver mais"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Divider — only when catalog info exists and book is in library */}
+          {(avgRating || genres.length > 0 || synopsis) && inLib && (
+            <div style={{ height:1, background:P.bdr, margin:"0 0 18px" }} />
+          )}
+
+          {!editing ? (
+            inLib ? (
+              /* ── IN LIBRARY VIEW ── */
+              <>
+                {libBook.impact > 0 && <div style={{ display:"flex", gap:3, marginBottom:14 }}>{[1,2,3,4,5].map(i=><span key={i} style={{ color:i<=libBook.impact?P.accent:P.bdr, fontSize:18 }}>★</span>)}</div>}
+                {allTags.length > 0 && (
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:5, marginBottom:14 }}>
+                    {allTags.map((val,i) => { const c=EMOCAO_COR[val]||P.accent; return <div key={i} style={{ background:`${c}15`, border:`1px solid ${c}30`, borderRadius:5, padding:"3px 9px", fontSize:12, color:c }}>{EMOCAO_EMOJI[val]||""} {val}</div>; })}
+                  </div>
+                )}
+                {libBook.phrase && <div style={{ borderLeft:`2px solid ${P.accent}`, paddingLeft:16, marginBottom:14, fontSize:14, color:P.sub, fontStyle:"italic", lineHeight:1.75 }}>"{libBook.phrase}"</div>}
+                {libBook.moment && <div style={{ background:P.surf, borderRadius:10, padding:"9px 14px", marginBottom:14, fontSize:12, color:P.muted }}>📍 {libBook.moment}</div>}
+                {libBook.provocations?.filter(p=>p.a).map((p,i) => (
+                  <div key={i} style={{ marginBottom:14 }}>
+                    <div style={{ fontSize:13, color:P.accent, marginBottom:4, fontStyle:"italic" }}>"{p.q}"</div>
+                    <div style={{ fontSize:14, color:P.sub, lineHeight:1.75 }}>{p.a}</div>
+                  </div>
+                ))}
+
+                <div style={{ display:"flex", gap:8, marginTop:6 }}>
+                  <button onClick={() => setEditing(true)} style={{ ...btnAccent(true), flex:1, height:46 }}>Editar review</button>
+                  <button onClick={onClose} style={{ ...btnOutline, height:46, minWidth:80 }}>Fechar</button>
+                </div>
+
+                {!confirmDel
+                  ? <button onClick={() => setConfirmDel(true)} style={{ marginTop:10, width:"100%", height:38, background:"transparent", border:`1px solid rgba(180,60,60,0.3)`, borderRadius:12, color:"#b43c3c", fontSize:12, fontFamily:mono, cursor:"pointer" }}>Remover da biblioteca</button>
+                  : <div style={{ marginTop:10, background:"rgba(180,60,60,0.07)", border:`1px solid rgba(180,60,60,0.25)`, borderRadius:12, padding:"12px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                      <span style={{ fontSize:13, color:"#b43c3c" }}>Confirmar remoção?</span>
+                      <div style={{ display:"flex", gap:6 }}>
+                        <button onClick={() => onDelete(inLib.id)} style={{ background:"#b43c3c", color:"#fff", border:"none", borderRadius:8, padding:"6px 14px", cursor:"pointer", fontSize:12 }}>Remover</button>
+                        <button onClick={() => setConfirmDel(false)} style={{ background:"transparent", border:`1px solid ${P.bdr}`, color:P.muted, borderRadius:8, padding:"6px 12px", cursor:"pointer", fontSize:12 }}>Cancelar</button>
+                      </div>
+                    </div>
+                }
+              </>
+            ) : (
+              /* ── NOT IN LIBRARY ── */
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={() => { onAdd({ ...book, status: "lendo" }); onClose(); }} style={{ ...btnAccent(true), flex:1, height:46 }}>Adicionar à biblioteca</button>
+                <button onClick={() => { onAdd({ ...book, status: "quero ler" }); onClose(); }} style={{ ...btnOutline, height:46, flex:1 }}>+ Fila</button>
+              </div>
+            )
+          ) : (
+            /* ── EDIT MODE ── */
+            <>
+              <div style={sectionLabel}>status</div>
+              <div style={{ display:"flex", gap:6, marginBottom:20 }}>
+                {["lido","lendo","quero ler","abandonado"].map(s => (
+                  <button key={s} onClick={() => setStatus(s)} style={chip(status === s)}>{s}</button>
+                ))}
+              </div>
+
+              {status === "lido" && (
+                <div style={{ marginBottom:20 }}>
+                  <div style={sectionLabel}>impacto pessoal</div>
+                  <div style={{ display:"flex", gap:6 }}>
+                    {[1,2,3,4,5].map(n => (
+                      <button key={n} onClick={() => setImpact(n)} style={{ width:38, height:38, borderRadius:10, fontSize:16, cursor:"pointer", background:impact >= n ? P.accentS : "transparent", border:`1px solid ${impact >= n ? P.accent : P.bdr}`, color:impact >= n ? P.accent : P.muted, transition:"all .15s" }}>★</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div style={{ marginBottom:20 }}>
-                <div style={sectionLabel}>impacto pessoal</div>
-                <div style={{ display:"flex", gap:6 }}>
-                  {[1,2,3,4,5].map(n => (
-                    <button key={n} onClick={() => setImpact(n)} style={{ width:38, height:38, borderRadius:10, fontSize:16, cursor:"pointer", background:impact >= n ? P.accentS : "transparent", border:`1px solid ${impact >= n ? P.accent : P.bdr}`, color:impact >= n ? P.accent : P.muted, transition:"all .15s" }}>★</button>
+                <div style={sectionLabel}>emoções evocadas</div>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                  {Object.entries(EMOCAO_COR).map(([em, cor]) => (
+                    <button key={em} onClick={() => toggleEmo(em)} style={chip(emocoes.includes(em), cor)}>
+                      {EMOCAO_EMOJI[em]} {em}
+                    </button>
                   ))}
                 </div>
               </div>
-            )}
 
-            {/* Emoções */}
-            <div style={{ marginBottom:20 }}>
-              <div style={sectionLabel}>emoções evocadas</div>
-              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
-                {Object.entries(EMOCAO_COR).map(([em, cor]) => (
-                  <button key={em} onClick={() => toggleEmo(em)} style={chip(emocoes.includes(em), cor)}>
-                    {EMOCAO_EMOJI[em]} {em}
-                  </button>
-                ))}
+              <div style={{ marginBottom:14 }}>
+                <div style={sectionLabel}>frase que ficou</div>
+                <input value={phrase} onChange={e => setPhrase(e.target.value)} placeholder="Uma imagem, sensação ou frase..." style={smallInput} />
               </div>
-            </div>
 
-            {/* Frase */}
-            <div style={{ marginBottom:14 }}>
-              <div style={sectionLabel}>frase que ficou</div>
-              <input value={phrase} onChange={e => setPhrase(e.target.value)} placeholder="Uma imagem, sensação ou frase..." style={smallInput} />
-            </div>
+              <div style={{ marginBottom:24 }}>
+                <div style={sectionLabel}>momento de vida</div>
+                <input value={moment} onChange={e => setMoment(e.target.value)} placeholder="O que estava acontecendo quando você leu..." style={smallInput} />
+              </div>
 
-            {/* Momento */}
-            <div style={{ marginBottom:24 }}>
-              <div style={sectionLabel}>momento de vida</div>
-              <input value={moment} onChange={e => setMoment(e.target.value)} placeholder="O que estava acontecendo quando você leu..." style={smallInput} />
-            </div>
-
-            <div style={{ display:"flex", gap:8 }}>
-              <button onClick={handleSave} style={{ ...btnAccent(true), flex:1, height:50 }}>Salvar alterações ✓</button>
-              <button onClick={() => setEditing(false)} style={{ ...btnOutline, height:50, minWidth:80 }}>Cancelar</button>
-            </div>
-          </>
-        )}
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={handleSave} style={{ ...btnAccent(true), flex:1, height:50 }}>Salvar alterações ✓</button>
+                <button onClick={() => setEditing(false)} style={{ ...btnOutline, height:50, minWidth:80 }}>Cancelar</button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
