@@ -814,11 +814,39 @@ function RegisterTab({ onAdd }) {
   const [impact, setImpact]       = useState(0);
   const [status, setStatus]       = useState("lido");
 
-  const DEMO=[{id:"d1",title:"Clube da Luta",author:"Chuck Palahniuk",year:"1996",synopsis:"Um homem insatisfeito forma um clube de luta secreto."},{id:"d2",title:"1984",author:"George Orwell",year:"1949",synopsis:"Em um Estado totalitário, Winston Smith questiona o controle absoluto do Partido."},{id:"d3",title:"Norwegian Wood",author:"Haruki Murakami",year:"1987",synopsis:"Uma história de amor e perda no Japão dos anos 60."},{id:"d4",title:"Sapiens",author:"Yuval Noah Harari",year:"2011",synopsis:"Uma breve história da humanidade."}];
-
-  function handleSearch() {
-    if(!query.trim()) return; setLoading(true);
-    setTimeout(()=>{const q=query.toLowerCase();const found=DEMO.find(b=>b.title.toLowerCase().includes(q)||b.author.toLowerCase().includes(q))||{id:`c_${Date.now()}`,title:query,author:"Autor desconhecido",year:String(new Date().getFullYear()),synopsis:`"${query}" aguarda seus registros.`};setFoundBook(found);setLoading(false);},600);
+  async function handleSearch() {
+    if(!query.trim()) return;
+    setLoading(true);
+    try {
+      const res = await fetch('https://fqwugqengnenliyouojj.supabase.co/functions/v1/search-book', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
+          'apikey': process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query }),
+      });
+      const data = await res.json();
+      const first = data.books?.[0];
+      if (first) {
+        setFoundBook({
+          id: first.dim_book_id || first.id || first.isbn,
+          dim_book_id: first.dim_book_id || null,
+          title: first.title,
+          author: first.author,
+          year: first.year?.toString() || '',
+          synopsis: first.synopsis || '',
+          cover_url: first.cover_url || null,
+        });
+      } else {
+        setFoundBook({ id:`c_${Date.now()}`, dim_book_id:null, title:query, author:"Autor desconhecido", year:String(new Date().getFullYear()), synopsis:`"${query}" aguarda seus registros.` });
+      }
+    } catch(_) {
+      setFoundBook({ id:`c_${Date.now()}`, dim_book_id:null, title:query, author:"Autor desconhecido", year:String(new Date().getFullYear()), synopsis:`"${query}" aguarda seus registros.` });
+    } finally {
+      setLoading(false);
+    }
   }
 
   function handleConfirm() {
@@ -829,6 +857,7 @@ function RegisterTab({ onAdd }) {
   function handleSave() {
     onAdd({
       title:foundBook.title, author:foundBook.author, year:foundBook.year,
+      dim_book_id:foundBook.dim_book_id||null,
       status, dateRead:status==="lido"?new Date().toISOString().split("T")[0]:null,
       impact:status==="lido"?impact:null, phrase:phrase||null, moment:moment||null,
       checkboxes:answers,

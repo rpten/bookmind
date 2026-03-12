@@ -1,7 +1,11 @@
 // ══════════════════════════════════════════════════════════════
 // Edge Function: search-book
-// Busca livros em dim_books. Se não encontrar, consulta Open Library
-// (com ratings) e Google Books como fallback.
+// 1. Cache em dim_books (título, author, title_alt)
+// 2. Google Books → lista de resultados
+// 3. Para cada resultado: ISBN → OL work_id → match em dim_books
+//    - Match por ISBN  → retorna registro existente + salva title_alt
+//    - Match por work_id → retorna registro existente + salva title_alt
+//    - Sem match → insere novo registro em dim_books
 // ══════════════════════════════════════════════════════════════
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
@@ -12,8 +16,122 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+const SELECT = 'id, title, author, year, synopsis, cover_url, isbn, avg_rating, ratings_count, title_alt, ol_work_id'
+
+// ── Helpers ────────────────────────────────────────────────────
+
+// Adiciona searchQuery em title_alt do registro existente (se ainda não constar)
+async function addTitleAlt(
+  supabase: ReturnType<typeof createClient>,
+  existing: Record<string, unknown>,
+  searchQuery: string,
+) {
+  const titleAlts = (existing.title_alt as string[]) || []
+  const normalized = searchQuery.trim()
+  const alreadyKnown =
+    normalized.toLowerCase() === (existing.title as string).toLowerCase() ||
+    titleAlts.some(t => t.toLowerCase() === normalized.toLowerCase())
+
+  if (!alreadyKnown && normalized) {
+    await supabase
+      .from('dim_books')
+      .update({ title_alt: [...titleAlts, normalized] })
+      .eq('id', existing.id)
+  }
+}
+
+// Resolve ol_work_id a partir de um ISBN via Open Library
+async function fetchOLWorkId(isbn: string): Promise<string | null> {
+  try {
+    const res = await fetch(`https://openlibrary.org/isbn/${isbn}.json`, {
+      headers: { 'User-Agent': 'BookMind/1.0' },
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    const workKey = data.works?.[0]?.key  // "/works/OL27258W"
+    if (!workKey) return null
+    return workKey.replace('/works/', '')  // "OL27258W"
+  } catch {
+    return null
+  }
+}
+
+// Tenta linkar o livro a um registro existente em dim_books:
+//   1. Por ISBN  → match direto
+//   2. Por ol_work_id → match cruzado (ex: edição PT ↔ EN)
+//   3. Por título+autor (sem ISBN)
+// Se não encontrar, insere novo registro.
+// Em todos os casos de match, adiciona searchQuery ao title_alt.
+async function resolveBook(
+  supabase: ReturnType<typeof createClient>,
+  book: Record<string, unknown>,
+  searchQuery: string,
+): Promise<{ dim_book_id: string | null; existingData: Record<string, unknown> | null }> {
+  // 1. Match por ISBN
+  if (book.isbn) {
+    const { data: byIsbn } = await supabase
+      .from('dim_books')
+      .select(SELECT)
+      .eq('isbn', book.isbn)
+      .maybeSingle()
+
+    if (byIsbn) {
+      await addTitleAlt(supabase, byIsbn, searchQuery)
+      return { dim_book_id: byIsbn.id as string, existingData: byIsbn }
+    }
+  }
+
+  // 2. Resolve ol_work_id e tenta match cruzado
+  let workId: string | null = null
+  if (book.isbn) {
+    workId = await fetchOLWorkId(book.isbn as string)
+
+    if (workId) {
+      const { data: byWorkId } = await supabase
+        .from('dim_books')
+        .select(SELECT)
+        .eq('ol_work_id', workId)
+        .maybeSingle()
+
+      if (byWorkId) {
+        await addTitleAlt(supabase, byWorkId, searchQuery)
+        // Aproveita para salvar o ISBN da nova edição se o registro não tinha
+        if (!byWorkId.isbn && book.isbn) {
+          await supabase.from('dim_books').update({ isbn: book.isbn }).eq('id', byWorkId.id)
+        }
+        return { dim_book_id: byWorkId.id as string, existingData: byWorkId }
+      }
+    }
+  }
+
+  // 3. Sem ISBN: verifica título+autor
+  if (!book.isbn) {
+    const { data: existing } = await supabase
+      .from('dim_books')
+      .select(SELECT)
+      .ilike('title', book.title as string)
+      .ilike('author', book.author as string)
+      .maybeSingle()
+
+    if (existing) {
+      await addTitleAlt(supabase, existing, searchQuery)
+      return { dim_book_id: existing.id as string, existingData: existing }
+    }
+  }
+
+  // 4. Não encontrado → insere novo registro (com ol_work_id se resolvido)
+  const { data: inserted } = await supabase
+    .from('dim_books')
+    .insert({ ...book, ol_work_id: workId })
+    .select('id')
+    .single()
+
+  return { dim_book_id: (inserted?.id as string) ?? null, existingData: null }
+}
+
+// ── Handler ─────────────────────────────────────────────────────
+
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
@@ -28,204 +146,83 @@ serve(async (req) => {
       )
     }
 
-    // Supabase client with service role (para escrever em dim_books)
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    const supabase = createClient(supabaseUrl, supabaseServiceKey)
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    )
 
-    // 1. Busca em dim_books primeiro
-    const { data: cachedBooks, error: dbError } = await supabase
+    // ── 1. Cache: título, autor e title_alt ──────────────────────
+    const { data: cached, error: dbError } = await supabase
       .from('dim_books')
       .select('id, title, author, year, synopsis, cover_url, isbn, avg_rating, ratings_count')
-      .or(`title.ilike.%${query}%,author.ilike.%${query}%`)
+      .or(`title.ilike.%${query}%,author.ilike.%${query}%,title_alt.cs.{"${query}"}`)
       .limit(10)
 
     if (dbError) throw dbError
 
-    // Se encontrou resultados, retorna (id já é o UUID do dim_books)
-    if (cachedBooks && cachedBooks.length > 0) {
+    if (cached && cached.length > 0) {
       return new Response(
         JSON.stringify({
-          books: cachedBooks.map(b => ({ ...b, dim_book_id: b.id })),
+          books: cached.map(b => ({ ...b, dim_book_id: b.id })),
           source: 'cache',
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // 2. Se não encontrou, busca na Open Library
-    const openLibraryUrl = `https://openlibrary.org/search.json?q=${encodeURIComponent(query)}&limit=10`
-    const olResponse = await fetch(openLibraryUrl)
-    const olData = await olResponse.json()
-
-    if (olData.docs && olData.docs.length > 0) {
-      // 3. Processa e salva resultados da Open Library
-      const books = []
-      for (const doc of olData.docs.slice(0, 10)) {
-        // Buscar ratings do Open Library
-        let avg_rating = null
-        let ratings_count = null
-
-        if (doc.key) {
-          try {
-            const ratingsResponse = await fetch(`https://openlibrary.org${doc.key}/ratings.json`)
-            const ratingsData = await ratingsResponse.json()
-            if (ratingsData.summary) {
-              avg_rating = ratingsData.summary.average ?? null
-              ratings_count = ratingsData.summary.count ?? null
-            }
-          } catch (_e) {
-            // continua sem ratings
-          }
-        }
-
-        const book = {
-          isbn: doc.isbn?.[0] || null,
-          title: doc.title || 'Sem título',
-          author: doc.author_name?.[0] || 'Autor desconhecido',
-          year: doc.first_publish_year || null,
-          synopsis: doc.first_sentence?.[0] || null,
-          cover_url: doc.cover_i
-            ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`
-            : null,
-          genres: doc.subject?.slice(0, 5) || [],
-          language: doc.language?.[0] || 'en',
-          page_count: doc.number_of_pages_median || null,
-          avg_rating,
-          ratings_count,
-          source: 'open_library',
-          raw_data: doc,
-        }
-
-        // Salva no dim_books (evita duplicatas por ISBN ou título+autor)
-        let dim_book_id: string | null = null
-        if (book.isbn) {
-          await supabase
-            .from('dim_books')
-            .upsert(book, { onConflict: 'isbn', ignoreDuplicates: true })
-          const { data: found } = await supabase
-            .from('dim_books')
-            .select('id')
-            .eq('isbn', book.isbn)
-            .maybeSingle()
-          dim_book_id = found?.id ?? null
-        } else {
-          // Sem ISBN: verifica se já existe pelo título+autor antes de inserir
-          const { data: existing } = await supabase
-            .from('dim_books')
-            .select('id')
-            .ilike('title', book.title)
-            .ilike('author', book.author)
-            .maybeSingle()
-          if (existing) {
-            dim_book_id = existing.id
-          } else {
-            const { data: inserted } = await supabase
-              .from('dim_books')
-              .insert(book)
-              .select('id')
-              .single()
-            dim_book_id = inserted?.id ?? null
-          }
-        }
-
-        books.push({
-          id: dim_book_id || book.isbn || `ol-${doc.key}`,
-          dim_book_id,
-          title: book.title,
-          author: book.author,
-          year: book.year,
-          synopsis: book.synopsis,
-          cover_url: book.cover_url,
-          isbn: book.isbn,
-          avg_rating: book.avg_rating,
-          ratings_count: book.ratings_count,
-        })
-      }
-
-      return new Response(
-        JSON.stringify({ books, source: 'open_library' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
-    // 4. Fallback: Google Books
-    const gbResponse = await fetch(
-      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=10`
+    // ── 2. Google Books → lista de resultados ────────────────────
+    const gbRes = await fetch(
+      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(query)}&maxResults=5`
     )
-    const gbData = await gbResponse.json()
+    const gbData = await gbRes.json()
 
-    if (!gbData.items || gbData.items.length === 0) {
+    if (!gbData.items?.length) {
       return new Response(
         JSON.stringify({ books: [], source: 'google_books' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    const books = []
-    for (const item of gbData.items) {
-      const v = item.volumeInfo
+    // ── 3. Resolve cada resultado em paralelo ────────────────────
+    //   ISBN → OL work_id → dim_books match → insert se necessário
+    const books = await Promise.all(
+      gbData.items.slice(0, 5).map(async (item: Record<string, unknown>) => {
+        const v = item.volumeInfo as Record<string, unknown>
+        const identifiers = v.industryIdentifiers as { type: string; identifier: string }[] | undefined
 
-      const book = {
-        isbn: v.industryIdentifiers?.find((id: { type: string }) => id.type === 'ISBN_13')?.identifier || null,
-        title: v.title || 'Sem título',
-        author: v.authors?.[0] || 'Autor desconhecido',
-        year: v.publishedDate ? parseInt(v.publishedDate.substring(0, 4)) : null,
-        synopsis: v.description || null,
-        cover_url: v.imageLinks?.thumbnail?.replace('http:', 'https:') || null,
-        genres: v.categories || [],
-        language: v.language || 'en',
-        page_count: v.pageCount || null,
-        avg_rating: v.averageRating || null,
-        ratings_count: v.ratingsCount || null,
-        source: 'google_books',
-        raw_data: item,
-      }
-
-      let dim_book_id: string | null = null
-      if (book.isbn) {
-        await supabase
-          .from('dim_books')
-          .upsert(book, { onConflict: 'isbn', ignoreDuplicates: true })
-        const { data: found } = await supabase
-          .from('dim_books')
-          .select('id')
-          .eq('isbn', book.isbn)
-          .maybeSingle()
-        dim_book_id = found?.id ?? null
-      } else {
-        // Sem ISBN: verifica se já existe pelo título+autor antes de inserir
-        const { data: existing } = await supabase
-          .from('dim_books')
-          .select('id')
-          .ilike('title', book.title)
-          .ilike('author', book.author)
-          .maybeSingle()
-        if (existing) {
-          dim_book_id = existing.id
-        } else {
-          const { data: inserted } = await supabase
-            .from('dim_books')
-            .insert(book)
-            .select('id')
-            .single()
-          dim_book_id = inserted?.id ?? null
+        const book = {
+          isbn: identifiers?.find(id => id.type === 'ISBN_13')?.identifier || null,
+          title: (v.title as string) || 'Sem título',
+          author: (v.authors as string[])?.[0] || 'Autor desconhecido',
+          year: v.publishedDate ? parseInt((v.publishedDate as string).substring(0, 4)) : null,
+          synopsis: (v.description as string) || null,
+          cover_url: (v.imageLinks as Record<string, string>)?.thumbnail?.replace('http:', 'https:') || null,
+          genres: (v.categories as string[]) || [],
+          language: (v.language as string) || 'en',
+          page_count: (v.pageCount as number) || null,
+          avg_rating: (v.averageRating as number) || null,
+          ratings_count: (v.ratingsCount as number) || null,
+          source: 'google_books',
+          raw_data: item,
         }
-      }
 
-      books.push({
-        id: dim_book_id || book.isbn || `gb-${item.id}`,
-        dim_book_id,
-        title: book.title,
-        author: book.author,
-        year: book.year,
-        synopsis: book.synopsis,
-        cover_url: book.cover_url,
-        isbn: book.isbn,
-        avg_rating: book.avg_rating,
-        ratings_count: book.ratings_count,
+        const { dim_book_id, existingData } = await resolveBook(supabase, book, query)
+        const resolved = existingData ?? book
+
+        return {
+          id: dim_book_id || book.isbn || `gb-${(item.id as string)}`,
+          dim_book_id,
+          title: resolved.title,
+          author: resolved.author,
+          year: resolved.year,
+          synopsis: resolved.synopsis,
+          cover_url: resolved.cover_url,
+          isbn: (resolved.isbn as string | null) ?? book.isbn,
+          avg_rating: resolved.avg_rating,
+          ratings_count: resolved.ratings_count,
+        }
       })
-    }
+    )
 
     return new Response(
       JSON.stringify({ books, source: 'google_books' }),
