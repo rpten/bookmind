@@ -59,14 +59,27 @@ async function getEmbedding(text) {
   return data.data[0].embedding  // float[]
 }
 
-async function main() {
-  const { data: books, error } = await supabase
-    .from('dim_books')
-    .select('id, title, author, year, synopsis, genres')
-    .is('embedding', null)
-    .order('created_at', { ascending: true })
+async function fetchAllWithoutEmbedding() {
+  const PAGE = 1000
+  let all = [], page = 0
+  while (true) {
+    const { data, error } = await supabase
+      .from('dim_books')
+      .select('id, title, author, year, synopsis, genres')
+      .is('embedding', null)
+      .order('created_at', { ascending: true })
+      .range(page * PAGE, (page + 1) * PAGE - 1)
+    if (error) { console.error('Supabase error:', error); process.exit(1) }
+    if (!data || data.length === 0) break
+    all = all.concat(data)
+    if (data.length < PAGE) break
+    page++
+  }
+  return all
+}
 
-  if (error) { console.error('Supabase error:', error); process.exit(1) }
+async function main() {
+  const books = await fetchAllWithoutEmbedding()
   console.log(`\n🔢 ${books.length} livros sem embedding. Iniciando...\n`)
 
   let updated = 0, errors = 0
