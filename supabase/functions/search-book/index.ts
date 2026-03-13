@@ -168,6 +168,9 @@ serve(async (req) => {
 
   try {
     const { query } = await req.json()
+    const ts = () => new Date().toISOString()
+    const log = (step: string, data: Record<string, unknown>) =>
+      console.log(JSON.stringify({ step, query, ...data, timestamp: ts() }))
 
     if (!query || query.trim().length < 2) {
       return new Response(
@@ -175,6 +178,8 @@ serve(async (req) => {
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+
+    log('request', { query })
 
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL')!,
@@ -197,6 +202,7 @@ serve(async (req) => {
     const cached = (rawCached || []).filter(b => !isJunk(b.title || ''))
 
     if (cached.length > 0) {
+      log('cache_hit', { result: 'hit', count: cached.length })
       return new Response(
         JSON.stringify({
           books: cached.slice(0, 10).map(b => ({ ...b, dim_book_id: b.id })),
@@ -205,6 +211,8 @@ serve(async (req) => {
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+
+    log('cache_miss', { result: 'miss', raw_count: rawCached?.length ?? 0 })
 
     // ── 2. Google Books API ───────────────────────────────────────
     // intitle:X|inauthor:X busca por título OU autor sem misturar temas
@@ -225,11 +233,14 @@ serve(async (req) => {
       return true
     })
 
+    log('google_books', { total: gbData.items?.length ?? 0, after_filter: filtered.length })
+
     // ── 2b. Fallback Open Library quando GB retorna < 2 resultados ─
     let itemsToProcess: Record<string, unknown>[] = filtered.slice(0, 5)
     if (filtered.length < 2) {
-      console.log(`[OL] GB returned ${filtered.length} results — trying OL fallback`)
+      log('ol_fallback', { reason: `GB returned ${filtered.length} results` })
       const olItems = await fetchOLBooks(query)
+      log('ol_fallback_result', { ol_count: olItems.length })
       if (olItems.length > 0) {
         const gbTitles = new Set(filtered.map((i: Record<string, unknown>) => {
           const v = i.volumeInfo as Record<string, unknown>
@@ -244,6 +255,7 @@ serve(async (req) => {
     }
 
     if (!itemsToProcess.length) {
+      log('no_results', { result: 'empty' })
       return new Response(
         JSON.stringify({ books: [], source: 'google_books' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -277,6 +289,7 @@ serve(async (req) => {
           if (isbn) {
             // a. Fetch ol_work_id — usa pre-resolvido para itens OL, senão busca via ISBN
             const workId = (item._ol_work_id as string | null) ?? await fetchOLWorkId(isbn)
+            log('resolve_isbn', { isbn, ol_work_id: workId ?? null })
 
             if (workId) {
               // b. Busca por ol_work_id ──────────────────────────────
@@ -287,6 +300,7 @@ serve(async (req) => {
                 .maybeSingle()
 
               if (byWorkId) {
+                log('resolve_result', { isbn, result: 'found_by_ol_work_id', dim_book_id: byWorkId.id })
                 await addTitleAlt(supabase, byWorkId, query)
                 if (!byWorkId.isbn) {
                   await supabase.from('dim_books').update({ isbn }).eq('id', byWorkId.id)
@@ -303,6 +317,7 @@ serve(async (req) => {
               .maybeSingle()
 
             if (byIsbn) {
+              log('resolve_result', { isbn, result: 'found_by_isbn', dim_book_id: byIsbn.id })
               await addTitleAlt(supabase, byIsbn, query)
               if (workId && !byIsbn.ol_work_id) {
                 await supabase.from('dim_books').update({ ol_work_id: workId }).eq('id', byIsbn.id)
@@ -311,6 +326,7 @@ serve(async (req) => {
             }
 
             // d. Insere novo com ol_work_id ────────────────────────
+            log('resolve_result', { isbn, result: 'inserting_new', ol_work_id: workId ?? null })
             const { data: inserted } = await supabase
               .from('dim_books')
               .insert({ ...bookData, ol_work_id: workId })
@@ -372,13 +388,14 @@ serve(async (req) => {
       return true
     })
 
+    log('response', { count: books.length, source: 'google_books' })
     return new Response(
       JSON.stringify({ books, source: 'google_books' }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 
   } catch (error) {
-    console.error('Error in search-book:', error)
+    console.error(JSON.stringify({ step: 'error', query: 'unknown', message: (error as Error).message, timestamp: new Date().toISOString() }))
     return new Response(
       JSON.stringify({ error: error.message }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
