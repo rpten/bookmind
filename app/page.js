@@ -588,9 +588,24 @@ function SmartQueue({ books, onSelect }) {
 }
 
 // ─── PESQUISA ─────────────────────────────────────────────────
+function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom ? dot / denom : 0;
+}
+
+function parseVec(v) {
+  if (!v) return null;
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } }
+  return null;
+}
+
 function SearchTab({ books, onSelect, onAdd }) {
   const [query, setQuery]       = useState("");
   const [results, setResults]   = useState([]);
+  const [compats, setCompats]   = useState({});
   const [sheet, setSheet]       = useState(null);
   const [searchLoading, setSearchLoading] = useState(false);
 
@@ -634,33 +649,75 @@ function SearchTab({ books, onSelect, onAdd }) {
     setRegBook(null);
   }
 
+  async function computeCompats(searchResults) {
+    if (books.length < 3) { setCompats({}); return; }
+
+    const highImpact = books.filter(b => b.impact >= 4 && b.dim_book_id).slice(0, 5);
+    const resultIds  = searchResults.filter(r => r.dim_book_id).map(r => r.dim_book_id);
+    if (resultIds.length === 0) { setCompats({}); return; }
+
+    const allIds = [...new Set([...resultIds, ...highImpact.map(b => b.dim_book_id)])];
+
+    const { data: dimData } = await supabase
+      .from('dim_books')
+      .select('id, embedding, genres')
+      .in('id', allIds);
+
+    if (!dimData) { setCompats({}); return; }
+
+    const embMap   = {};   // id → float[]
+    const genreMap = {};   // id → string[]
+    for (const row of dimData) {
+      embMap[row.id]   = parseVec(row.embedding);
+      genreMap[row.id] = row.genres || [];
+    }
+
+    const userGenres    = new Set(books.flatMap(b => b.genres || []));
+    const hiEmbeddings  = highImpact.map(b => embMap[b.dim_book_id]).filter(Boolean);
+
+    const newCompats = {};
+    for (const result of searchResults) {
+      if (!result.dim_book_id) continue;
+
+      // Genre score (40%)
+      const resGenres  = genreMap[result.dim_book_id] || result.genres || [];
+      const genreScore = resGenres.length > 0
+        ? resGenres.filter(g => userGenres.has(g)).length / resGenres.length
+        : 0;
+
+      // Embedding score (60%)
+      let embScore = 0;
+      const resEmb = embMap[result.dim_book_id];
+      if (resEmb && hiEmbeddings.length > 0) {
+        embScore = Math.max(...hiEmbeddings.map(e => cosine(resEmb, e)));
+      }
+
+      const score = Math.round((genreScore * 0.4 + embScore * 0.6) * 100);
+      if (score > 50) newCompats[result.dim_book_id] = score;
+    }
+    setCompats(newCompats);
+  }
+
  useEffect(() => {
-  console.log('ANON_KEY:', process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-  
-  if (!query.trim()) { 
-    setResults([]); 
-    return; 
+  if (!query.trim()) {
+    setResults([]);
+    setCompats({});
+    return;
   }
   
   
   const timer = setTimeout(async () => {
     setSearchLoading(true);
     try {
-      console.log('Headers sendo enviados:', {
-        'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
-        'apikey': process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-        'Content-Type': 'application/json',
-      });
-      
       const response = await fetch(
         'https://fqwugqengnenliyouojj.supabase.co/functions/v1/search-book',
         {
           method: 'POST',
           headers: {
-          'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
-          'apikey': process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-          'Content-Type': 'application/json',
-},
+            'Authorization': `Bearer ${process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY}`,
+            'apikey': process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+            'Content-Type': 'application/json',
+          },
           body: JSON.stringify({ query }),
         }
       );
@@ -675,12 +732,11 @@ function SearchTab({ books, onSelect, onAdd }) {
         synopsis: book.synopsis || 'Sem sinopse disponível',
         cover_url: book.cover_url,
         isbn: book.isbn || null,
-        compat: Math.floor(Math.random() * 30) + 70,
+        genres: book.genres || [],
       }));
-      
-      setResults(formattedResults);
 
       setResults(formattedResults);
+      computeCompats(formattedResults);
     } catch (error) {
       console.error('Erro ao buscar livros:', error);
       setResults([]);
@@ -720,7 +776,9 @@ function SearchTab({ books, onSelect, onAdd }) {
           <div style={{ flex:1 }}>
             <div style={{ fontSize:14, fontWeight:"bold", color:P.text }}>{book.title}</div>
             <div style={{ fontSize:11, color:P.muted, fontFamily:mono, marginTop:2 }}>{book.author} · {book.year}</div>
-            <span style={{ fontSize:11, color:P.accent, background:P.accentS, border:`1px solid ${P.accentM}`, borderRadius:5, padding:"2px 8px", fontFamily:mono, marginTop:5, display:"inline-block" }}>{book.compat}% compatível</span>
+            {compats[book.dim_book_id] && (
+              <span style={{ fontSize:11, color:P.accent, background:P.accentS, border:`1px solid ${P.accentM}`, borderRadius:5, padding:"2px 8px", fontFamily:mono, marginTop:5, display:"inline-block" }}>{compats[book.dim_book_id]}% compatível</span>
+            )}
           </div>
         </div>
       ))}

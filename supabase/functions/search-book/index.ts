@@ -1,12 +1,16 @@
 // ══════════════════════════════════════════════════════════════
 // Edge Function: search-book
 // 1. Cache: title ILIKE %query% OR title_alt @> ARRAY[query]
-// 2. Cache miss → Google Books API
-// 3. Para cada resultado:
-//    a. ISBN → match em dim_books → retorna existente + salva title_alt
-//    b. ISBN → OL work_id → match em dim_books → retorna existente + salva title_alt
-//    c. Sem match → insere novo registro
-// 4. Deduplicação final por ISBN antes de retornar
+//    (só retorna se ratings_count > 100 OR IS NULL)
+// 2. Cache miss → Google Books intitle:${query}
+//    Filtra: títulos com palavras-chave de resumo/guia
+//    Filtra: publicados antes de 1950 com menos de 50 ratings
+// 3. Para cada resultado com ISBN (em paralelo):
+//    a. Fetch ol_work_id via Open Library /api/books
+//    b. Busca dim_books por ol_work_id → retorna existente + salva title_alt
+//    c. Fallback: busca dim_books por ISBN  → retorna existente + salva title_alt
+//    d. Sem match: insere novo registro com ol_work_id
+// 4. Deduplicação final por ol_work_id (ou ISBN se null)
 // ══════════════════════════════════════════════════════════════
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
@@ -18,6 +22,9 @@ const corsHeaders = {
 }
 
 const SELECT = 'id, title, author, year, synopsis, cover_url, isbn, avg_rating, ratings_count, title_alt, ol_work_id'
+
+// Termos que indicam resumos/guias — não são livros originais
+const JUNK_TITLE_WORDS = ['resumo', 'summary', 'guia', 'guide', 'análise', 'sparknotes', 'kit ']
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -40,14 +47,18 @@ async function addTitleAlt(
   }
 }
 
+// Usa /api/books (jscmd=data) — retorna works[0].key com o work_id canônico
 async function fetchOLWorkId(isbn: string): Promise<string | null> {
   try {
-    const res = await fetch(`https://openlibrary.org/isbn/${isbn}.json`, {
-      headers: { 'User-Agent': 'BookMind/1.0' },
-    })
+    const res = await fetch(
+      `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`,
+      { headers: { 'User-Agent': 'BookMind/1.0' } },
+    )
     if (!res.ok) return null
     const data = await res.json()
-    const workKey = data.works?.[0]?.key
+    const entry = data[`ISBN:${isbn}`]
+    if (!entry) return null
+    const workKey = entry.works?.[0]?.key
     if (!workKey) return null
     return workKey.replace('/works/', '')
   } catch {
@@ -55,10 +66,15 @@ async function fetchOLWorkId(isbn: string): Promise<string | null> {
   }
 }
 
-function toResult(row: Record<string, unknown>, isbnOverride?: string | null) {
+function toResult(
+  row: Record<string, unknown>,
+  workIdOverride?: string | null,
+  isbnOverride?: string | null,
+) {
   return {
     id:            row.id as string,
     dim_book_id:   row.id as string,
+    ol_work_id:    workIdOverride ?? (row.ol_work_id as string | null),
     title:         row.title,
     author:        row.author,
     year:          row.year,
@@ -92,11 +108,13 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
     )
 
-    // ── 1. Cache: title ILIKE %query% OR title_alt @> ARRAY[query] ──
+    // ── 1. Cache ──────────────────────────────────────────────────
+    // Só retorna livros com dados suficientes (ratings_count > 100 ou sem dados)
     const { data: cached, error: dbError } = await supabase
       .from('dim_books')
       .select('id, title, author, year, synopsis, cover_url, isbn, avg_rating, ratings_count')
       .or(`title.ilike.%${query}%,title_alt.cs.{"${query}"}`)
+      .or('ratings_count.gt.100,ratings_count.is.null')
       .limit(10)
 
     if (dbError) throw dbError
@@ -112,9 +130,8 @@ serve(async (req) => {
     }
 
     // ── 2. Google Books API ───────────────────────────────────────
-    const gbQuery = `intitle:${query}+OR+inauthor:${query}`
     const gbRes = await fetch(
-      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(gbQuery)}&maxResults=5`
+      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`intitle:${query}`)}&maxResults=10`
     )
     const gbData = await gbRes.json()
 
@@ -125,70 +142,97 @@ serve(async (req) => {
       )
     }
 
+    // Filtro de qualidade: remove resumos/guias e livros antigos obscuros
+    const filtered = gbData.items.filter((item: Record<string, unknown>) => {
+      const v = item.volumeInfo as Record<string, unknown>
+      const title   = ((v.title as string) || '').toLowerCase()
+      const year    = v.publishedDate ? parseInt((v.publishedDate as string).substring(0, 4)) : null
+      const ratings = (v.ratingsCount as number) || 0
+
+      if (JUNK_TITLE_WORDS.some(w => title.includes(w))) return false
+      if (year && year < 1950 && ratings < 50) return false
+      return true
+    })
+
+    if (!filtered.length) {
+      return new Response(
+        JSON.stringify({ books: [], source: 'google_books' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
     // ── 3. Resolve cada resultado em paralelo ─────────────────────
-    const raw = await Promise.all(
-      gbData.items.slice(0, 5).map(async (item: Record<string, unknown>) => {
-        const v = item.volumeInfo as Record<string, unknown>
-        const identifiers = v.industryIdentifiers as { type: string; identifier: string }[] | undefined
-        const isbn = identifiers?.find(id => id.type === 'ISBN_13')?.identifier || null
+    const raw = (await Promise.all(
+      filtered.slice(0, 5).map(async (item: Record<string, unknown>) => {
+        try {
+          const v = item.volumeInfo as Record<string, unknown>
+          const identifiers = v.industryIdentifiers as { type: string; identifier: string }[] | undefined
+          const isbn = identifiers?.find(id => id.type === 'ISBN_13')?.identifier || null
 
-        const bookData = {
-          isbn,
-          title:         (v.title as string) || 'Sem título',
-          author:        (v.authors as string[])?.[0] || 'Autor desconhecido',
-          year:          v.publishedDate ? parseInt((v.publishedDate as string).substring(0, 4)) : null,
-          synopsis:      (v.description as string) || null,
-          cover_url:     (v.imageLinks as Record<string, string>)?.thumbnail?.replace('http:', 'https:') || null,
-          genres:        (v.categories as string[]) || [],
-          language:      (v.language as string) || 'en',
-          page_count:    (v.pageCount as number) || null,
-          avg_rating:    (v.averageRating as number) || null,
-          ratings_count: (v.ratingsCount as number) || null,
-          source:        'google_books',
-          raw_data:      item,
-        }
-
-        // a. Match por ISBN ────────────────────────────────────────
-        if (isbn) {
-          const { data: byIsbn } = await supabase
-            .from('dim_books')
-            .select(SELECT)
-            .eq('isbn', isbn)
-            .maybeSingle()
-
-          if (byIsbn) {
-            await addTitleAlt(supabase, byIsbn, query)
-            return toResult(byIsbn)
+          const bookData = {
+            isbn,
+            title:         (v.title as string) || 'Sem título',
+            author:        (v.authors as string[])?.[0] || 'Autor desconhecido',
+            year:          v.publishedDate ? parseInt((v.publishedDate as string).substring(0, 4)) : null,
+            synopsis:      (v.description as string) || null,
+            cover_url:     (v.imageLinks as Record<string, string>)?.thumbnail?.replace('http:', 'https:') || null,
+            genres:        (v.categories as string[]) || [],
+            language:      (v.language as string) || 'en',
+            page_count:    (v.pageCount as number) || null,
+            avg_rating:    (v.averageRating as number) || null,
+            ratings_count: (v.ratingsCount as number) || null,
+            source:        'google_books',
+            raw_data:      item,
           }
 
-          // b. OL work_id → match cruzado ──────────────────────────
-          const workId = await fetchOLWorkId(isbn)
+          if (isbn) {
+            // a. Fetch ol_work_id via Open Library ─────────────────
+            const workId = await fetchOLWorkId(isbn)
 
-          if (workId) {
-            const { data: byWorkId } = await supabase
-              .from('dim_books')
-              .select(SELECT)
-              .eq('ol_work_id', workId)
-              .maybeSingle()
+            if (workId) {
+              // b. Busca por ol_work_id ──────────────────────────────
+              const { data: byWorkId } = await supabase
+                .from('dim_books')
+                .select(SELECT)
+                .eq('ol_work_id', workId)
+                .maybeSingle()
 
-            if (byWorkId) {
-              await addTitleAlt(supabase, byWorkId, query)
-              if (!byWorkId.isbn) {
-                await supabase.from('dim_books').update({ isbn }).eq('id', byWorkId.id)
+              if (byWorkId) {
+                await addTitleAlt(supabase, byWorkId, query)
+                if (!byWorkId.isbn) {
+                  await supabase.from('dim_books').update({ isbn }).eq('id', byWorkId.id)
+                }
+                return toResult(byWorkId, workId, (byWorkId.isbn as string | null) ?? isbn)
               }
-              return toResult(byWorkId, (byWorkId.isbn as string | null) ?? isbn)
             }
 
-            // c. Insere novo com ol_work_id ──────────────────────────
+            // c. Fallback: busca por ISBN ──────────────────────────
+            const { data: byIsbn } = await supabase
+              .from('dim_books')
+              .select(SELECT)
+              .eq('isbn', isbn)
+              .maybeSingle()
+
+            if (byIsbn) {
+              await addTitleAlt(supabase, byIsbn, query)
+              if (workId && !byIsbn.ol_work_id) {
+                await supabase.from('dim_books').update({ ol_work_id: workId }).eq('id', byIsbn.id)
+              }
+              return toResult(byIsbn, workId ?? (byIsbn.ol_work_id as string | null), isbn)
+            }
+
+            // d. Insere novo com ol_work_id ────────────────────────
+            const workId2 = workId  // já resolvido acima
             const { data: inserted } = await supabase
               .from('dim_books')
-              .insert({ ...bookData, ol_work_id: workId })
+              .insert({ ...bookData, ol_work_id: workId2 })
               .select('id')
               .single()
 
             return {
               id:            (inserted?.id as string) || isbn,
               dim_book_id:   (inserted?.id as string) || null,
+              ol_work_id:    workId2,
               title:         bookData.title,
               author:        bookData.author,
               year:          bookData.year,
@@ -199,34 +243,40 @@ serve(async (req) => {
               ratings_count: bookData.ratings_count,
             }
           }
-        }
 
-        // c. Insere novo sem ISBN / sem ol_work_id ────────────────
-        const { data: inserted } = await supabase
-          .from('dim_books')
-          .insert(bookData)
-          .select('id')
-          .single()
+          // Sem ISBN: insere direto ────────────────────────────────
+          const { data: inserted } = await supabase
+            .from('dim_books')
+            .insert(bookData)
+            .select('id')
+            .single()
 
-        return {
-          id:            (inserted?.id as string) || `gb-${item.id as string}`,
-          dim_book_id:   (inserted?.id as string) || null,
-          title:         bookData.title,
-          author:        bookData.author,
-          year:          bookData.year,
-          synopsis:      bookData.synopsis,
-          cover_url:     bookData.cover_url,
-          isbn:          bookData.isbn,
-          avg_rating:    bookData.avg_rating,
-          ratings_count: bookData.ratings_count,
+          return {
+            id:            (inserted?.id as string) || `gb-${item.id as string}`,
+            dim_book_id:   (inserted?.id as string) || null,
+            ol_work_id:    null,
+            title:         bookData.title,
+            author:        bookData.author,
+            year:          bookData.year,
+            synopsis:      bookData.synopsis,
+            cover_url:     bookData.cover_url,
+            isbn:          bookData.isbn,
+            avg_rating:    bookData.avg_rating,
+            ratings_count: bookData.ratings_count,
+          }
+        } catch (e) {
+          console.error('Error resolving item:', e)
+          return null
         }
       })
-    )
+    )).filter(Boolean)
 
-    // ── 4. Deduplicação por ISBN ───────────────────────────────────
+    // ── 4. Deduplicação por ol_work_id (ou ISBN se null) ──────────
     const seen = new Set<string>()
     const books = raw.filter(b => {
-      const key = (b.isbn || b.dim_book_id) as string | null
+      const key = (b as Record<string, unknown>).ol_work_id as string
+        || (b as Record<string, unknown>).isbn as string
+        || (b as Record<string, unknown>).dim_book_id as string
       if (!key) return true
       if (seen.has(key)) return false
       seen.add(key)
