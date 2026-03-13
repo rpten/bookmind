@@ -1129,16 +1129,30 @@ function BookModal({ book, userLibrary, onClose, onAdd, onUpdate, onDelete }) {
   }
 
   const [showFullSynopsis, setShowFullSynopsis] = useState(false);
+  const [catalogData, setCatalogData] = useState(null);
+
+  // Fallback: busca dados do catálogo por ISBN se modal abrir sem metadados
+  useEffect(() => {
+    const hasCatalog = book.synopsis || book.avg_rating || book.genres?.length > 0;
+    if (hasCatalog || !book.isbn) return;
+    supabase
+      .from('dim_books')
+      .select('synopsis, avg_rating, ratings_count, genres, cover_url')
+      .eq('isbn', book.isbn)
+      .maybeSingle()
+      .then(({ data }) => { if (data) setCatalogData(data); });
+  }, [book.isbn]);
 
   const fmtRatings = n => n?.toLocaleString("pt-BR");
   const allTags    = [].concat(libBook.checkboxes?.emoção || []);
-  const genres     = book.genres || [];
-  const rawSynopsis = book.synopsis || null;
+  const genres     = (book.genres?.length ? book.genres : catalogData?.genres) || [];
+  const fullSynopsis = book.synopsis || catalogData?.synopsis || null;
+  const rawSynopsis = fullSynopsis;
   const synopsis   = rawSynopsis && !showFullSynopsis && rawSynopsis.length > 300
     ? rawSynopsis.slice(0, 300).trimEnd() + "…"
     : rawSynopsis;
-  const avgRating  = book.avg_rating || null;
-  const ratingsCount = book.ratings_count || null;
+  const avgRating  = book.avg_rating || catalogData?.avg_rating || null;
+  const ratingsCount = book.ratings_count || catalogData?.ratings_count || null;
 
   return (
     <div onClick={onClose} style={{ position:"fixed", inset:0, zIndex:200, background:"rgba(47,42,36,0.65)", backdropFilter:"blur(10px)", display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
@@ -1146,7 +1160,7 @@ function BookModal({ book, userLibrary, onClose, onAdd, onUpdate, onDelete }) {
 
         {/* Cover */}
         {book.cover_url ? (
-          <div style={{ position:"relative", height:220, flexShrink:0 }}>
+          <div style={{ position:"relative", height:220, overflow:"hidden", flexShrink:0 }}>
             <img src={book.cover_url} alt={book.title} style={{ width:"100%", height:"100%", objectFit:"cover", borderRadius:"24px 24px 0 0" }} />
             <div style={{ position:"absolute", inset:0, background:"linear-gradient(to bottom, transparent 40%, rgba(47,42,36,0.88) 100%)", borderRadius:"24px 24px 0 0" }} />
             <button onClick={onClose} style={{ position:"absolute", top:14, right:14, width:32, height:32, borderRadius:"50%", background:"rgba(47,42,36,0.5)", border:"none", color:"#fff", fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 }}>×</button>
