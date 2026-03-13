@@ -150,8 +150,9 @@ serve(async (req) => {
     }
 
     // ── 2. Google Books API ───────────────────────────────────────
+    // intitle:X|inauthor:X busca por título OU autor sem misturar temas
     const gbRes = await fetch(
-      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`intitle:${query}`)}&maxResults=10`
+      `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`intitle:${query}|inauthor:${query}`)}&maxResults=10`
     )
     const gbData = await gbRes.json()
 

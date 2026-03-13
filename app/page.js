@@ -1126,7 +1126,7 @@ function ChatTab({ books }) {
       <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
         {msgs.map((m, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: m.role === "user" ? "flex-end" : "flex-start", gap: 8 }}>
-            <div style={{ maxWidth: "82%", background: m.role === "user" ? P.accentS : P.surf, border: `1px solid ${m.role === "user" ? P.accentM : P.bdr}`, borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", padding: "12px 16px", fontSize: 14, color: P.text, lineHeight: 1.75, fontFamily: serif }}>
+            <div style={{ maxWidth: "82%", background: m.role === "user" ? P.accentS : P.surf, border: `1px solid ${m.role === "user" ? P.accentM : P.bdr}`, borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", padding: "12px 16px", fontSize: 14, color: P.text, lineHeight: 1.75, fontFamily: serif, whiteSpace: "pre-wrap" }}>
               {m.text}
             </div>
             {m.recs?.length > 0 && (
@@ -1225,9 +1225,11 @@ function BookModal({ book, userLibrary, onClose, onAdd, onUpdate, onDelete }) {
             <button onClick={onClose} style={{ position:"absolute", top:14, right:14, width:32, height:32, borderRadius:"50%", background:"rgba(47,42,36,0.5)", border:"none", color:"#fff", fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 }}>×</button>
           </div>
         ) : (
-          <div style={{ position:"relative", height:60, background:P.surf, borderRadius:"24px 24px 0 0" }}>
-            <div style={{ width:32, height:3, background:P.bdr, borderRadius:2, position:"absolute", top:18, left:"50%", transform:"translateX(-50%)" }} />
-            <button onClick={onClose} style={{ position:"absolute", top:14, right:14, width:32, height:32, borderRadius:"50%", background:P.surf, border:`1px solid ${P.bdr}`, color:P.muted, fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 }}>×</button>
+          <div style={{ position:"relative", height:140, background:"#ede8df", borderRadius:"24px 24px 0 0", display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <span style={{ fontSize:56, fontWeight:"bold", color:P.muted, opacity:0.35, userSelect:"none", lineHeight:1 }}>
+              {(book.title || "?").charAt(0).toUpperCase()}
+            </span>
+            <button onClick={onClose} style={{ position:"absolute", top:14, right:14, width:32, height:32, borderRadius:"50%", background:"rgba(47,42,36,0.12)", border:"none", color:P.muted, fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 }}>×</button>
           </div>
         )}
 
