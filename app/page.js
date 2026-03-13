@@ -1106,6 +1106,7 @@ function BookModal({ book, userLibrary, onClose, onAdd, onUpdate, onDelete }) {
   const libBook = inLib || book;
 
   const [editing, setEditing]       = useState(false);
+  const [editStep, setEditStep]     = useState(1);
   const [confirmDel, setConfirmDel] = useState(false);
   const [status,  setStatus]        = useState(libBook.status || "lendo");
   const [impact,  setImpact]        = useState(libBook.impact || 0);
@@ -1236,7 +1237,7 @@ function BookModal({ book, userLibrary, onClose, onAdd, onUpdate, onDelete }) {
                 ))}
 
                 <div style={{ display:"flex", gap:8, marginTop:6 }}>
-                  <button onClick={() => setEditing(true)} style={{ ...btnAccent(true), flex:1, height:46 }}>Editar review</button>
+                  <button onClick={() => { setEditing(true); setEditStep(1); }} style={{ ...btnAccent(true), flex:1, height:46 }}>Editar review</button>
                   <button onClick={onClose} style={{ ...btnOutline, height:46, minWidth:80 }}>Fechar</button>
                 </div>
 
@@ -1261,49 +1262,66 @@ function BookModal({ book, userLibrary, onClose, onAdd, onUpdate, onDelete }) {
           ) : (
             /* ── EDIT MODE ── */
             <>
-              <div style={sectionLabel}>status</div>
-              <div style={{ display:"flex", gap:6, marginBottom:20 }}>
-                {["lido","lendo","quero ler","abandonado"].map(s => (
-                  <button key={s} onClick={() => setStatus(s)} style={chip(status === s)}>{s}</button>
+              {/* Step indicator */}
+              <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:20 }}>
+                {[1,2].map(n => (
+                  <div key={n} style={{ height:3, flex:1, borderRadius:2, background: n <= editStep ? P.accent : P.bdr, transition:"background .2s" }} />
                 ))}
               </div>
 
-              {status === "lido" && (
-                <div style={{ marginBottom:20 }}>
-                  <div style={sectionLabel}>impacto pessoal</div>
-                  <div style={{ display:"flex", gap:6 }}>
-                    {[1,2,3,4,5].map(n => (
-                      <button key={n} onClick={() => setImpact(n)} style={{ width:38, height:38, borderRadius:10, fontSize:16, cursor:"pointer", background:impact >= n ? P.accentS : "transparent", border:`1px solid ${impact >= n ? P.accent : P.bdr}`, color:impact >= n ? P.accent : P.muted, transition:"all .15s" }}>★</button>
+              {editStep === 1 ? (
+                /* ── Step 1: Avaliar ── */
+                <>
+                  <div style={sectionLabel}>status</div>
+                  <div style={{ display:"flex", gap:6, marginBottom:20 }}>
+                    {["lido","lendo","quero ler","abandonado"].map(s => (
+                      <button key={s} onClick={() => setStatus(s)} style={chip(status === s)}>{s}</button>
                     ))}
                   </div>
-                </div>
+
+                  {status === "lido" && (
+                    <div style={{ marginBottom:20 }}>
+                      <div style={sectionLabel}>impacto pessoal</div>
+                      <div style={{ display:"flex", gap:6 }}>
+                        {[1,2,3,4,5].map(n => (
+                          <button key={n} onClick={() => setImpact(n)} style={{ width:38, height:38, borderRadius:10, fontSize:16, cursor:"pointer", background:impact >= n ? P.accentS : "transparent", border:`1px solid ${impact >= n ? P.accent : P.bdr}`, color:impact >= n ? P.accent : P.muted, transition:"all .15s" }}>★</button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ marginBottom:24 }}>
+                    <div style={sectionLabel}>emoções evocadas</div>
+                    <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                      {Object.entries(EMOCAO_COR).map(([em, cor]) => (
+                        <button key={em} onClick={() => toggleEmo(em)} style={chip(emocoes.includes(em), cor)}>
+                          {EMOCAO_EMOJI[em]} {em}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button onClick={() => setEditStep(2)} style={{ ...btnAccent(true), width:"100%", height:50 }}>Próximo →</button>
+                </>
+              ) : (
+                /* ── Step 2: Refletir ── */
+                <>
+                  <div style={{ marginBottom:14 }}>
+                    <div style={sectionLabel}>frase que ficou</div>
+                    <input value={phrase} onChange={e => setPhrase(e.target.value)} placeholder="Uma imagem, sensação ou frase..." style={smallInput} />
+                  </div>
+
+                  <div style={{ marginBottom:24 }}>
+                    <div style={sectionLabel}>momento de vida</div>
+                    <input value={moment} onChange={e => setMoment(e.target.value)} placeholder="O que estava acontecendo quando você leu..." style={smallInput} />
+                  </div>
+
+                  <div style={{ display:"flex", gap:8 }}>
+                    <button onClick={handleSave} style={{ ...btnAccent(true), flex:1, height:50 }}>Salvar alterações ✓</button>
+                    <button onClick={() => { setEditing(false); setEditStep(1); }} style={{ ...btnOutline, height:50, minWidth:80 }}>Cancelar</button>
+                  </div>
+                </>
               )}
-
-              <div style={{ marginBottom:20 }}>
-                <div style={sectionLabel}>emoções evocadas</div>
-                <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
-                  {Object.entries(EMOCAO_COR).map(([em, cor]) => (
-                    <button key={em} onClick={() => toggleEmo(em)} style={chip(emocoes.includes(em), cor)}>
-                      {EMOCAO_EMOJI[em]} {em}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div style={{ marginBottom:14 }}>
-                <div style={sectionLabel}>frase que ficou</div>
-                <input value={phrase} onChange={e => setPhrase(e.target.value)} placeholder="Uma imagem, sensação ou frase..." style={smallInput} />
-              </div>
-
-              <div style={{ marginBottom:24 }}>
-                <div style={sectionLabel}>momento de vida</div>
-                <input value={moment} onChange={e => setMoment(e.target.value)} placeholder="O que estava acontecendo quando você leu..." style={smallInput} />
-              </div>
-
-              <div style={{ display:"flex", gap:8 }}>
-                <button onClick={handleSave} style={{ ...btnAccent(true), flex:1, height:50 }}>Salvar alterações ✓</button>
-                <button onClick={() => setEditing(false)} style={{ ...btnOutline, height:50, minWidth:80 }}>Cancelar</button>
-              </div>
             </>
           )}
         </div>
