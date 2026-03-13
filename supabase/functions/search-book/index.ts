@@ -102,6 +102,63 @@ function toResult(
   }
 }
 
+// Busca no Open Library quando GB retorna < 2 resultados
+// Retorna itens no mesmo formato de volumeInfo que o step 3 espera
+async function fetchOLBooks(query: string): Promise<Record<string, unknown>[]> {
+  const enc = (s: string) => encodeURIComponent(s)
+  const fields = 'title,author_name,first_publish_year,isbn,key,cover_i,subject'
+  try {
+    const [titleRes, authorRes] = await Promise.all([
+      fetch(`https://openlibrary.org/search.json?title=${enc(query)}&limit=5&fields=${fields}`, { headers: { 'User-Agent': 'BookMind/1.0' } }),
+      fetch(`https://openlibrary.org/search.json?author=${enc(query)}&limit=5&fields=${fields}`, { headers: { 'User-Agent': 'BookMind/1.0' } }),
+    ])
+    const [td, ad] = await Promise.all([
+      titleRes.ok  ? titleRes.json()  : { docs: [] },
+      authorRes.ok ? authorRes.json() : { docs: [] },
+    ])
+    const allDocs = [...(td.docs || []), ...(ad.docs || [])]
+
+    // Dedup por key de work
+    const seen = new Set<string>()
+    const unique = allDocs.filter(doc => {
+      const key = (doc.key as string) || ''
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+
+    return unique
+      .filter(doc => !isJunk((doc.title as string) || ''))
+      .slice(0, 5)
+      .map(doc => {
+        const workId   = (doc.key as string)?.split('/')?.[2] ?? null
+        const isbnList = (doc.isbn as string[]) || []
+        const isbn13   = isbnList.find((i: string) => i.length === 13) || isbnList[0] || null
+        const coverId  = doc.cover_i as number | null
+
+        return {
+          _ol_work_id: workId,
+          volumeInfo: {
+            title:               (doc.title as string) || 'Sem título',
+            authors:             (doc.author_name as string[]) || [],
+            publishedDate:       String((doc.first_publish_year as number) || ''),
+            description:         null,
+            imageLinks:          coverId ? { thumbnail: `https://covers.openlibrary.org/b/id/${coverId}-M.jpg` } : undefined,
+            categories:          ((doc.subject as string[]) || []).slice(0, 3),
+            industryIdentifiers: isbn13 ? [{ type: 'ISBN_13', identifier: isbn13 }] : [],
+            averageRating:       null,
+            ratingsCount:        null,
+            pageCount:           null,
+            language:            'pt',
+          },
+        }
+      })
+  } catch (e) {
+    console.error('[OL] fetchOLBooks failed:', e)
+    return []
+  }
+}
+
 // ── Handler ─────────────────────────────────────────────────────
 
 serve(async (req) => {
@@ -156,15 +213,8 @@ serve(async (req) => {
     )
     const gbData = await gbRes.json()
 
-    if (!gbData.items?.length) {
-      return new Response(
-        JSON.stringify({ books: [], source: 'google_books' }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      )
-    }
-
     // Filtro de qualidade: remove junk e livros antigos obscuros
-    const filtered = gbData.items.filter((item: Record<string, unknown>) => {
+    const filtered = (gbData.items || []).filter((item: Record<string, unknown>) => {
       const v = item.volumeInfo as Record<string, unknown>
       const title   = (v.title as string) || ''
       const year    = v.publishedDate ? parseInt((v.publishedDate as string).substring(0, 4)) : null
@@ -175,7 +225,25 @@ serve(async (req) => {
       return true
     })
 
-    if (!filtered.length) {
+    // ── 2b. Fallback Open Library quando GB retorna < 2 resultados ─
+    let itemsToProcess: Record<string, unknown>[] = filtered.slice(0, 5)
+    if (filtered.length < 2) {
+      console.log(`[OL] GB returned ${filtered.length} results — trying OL fallback`)
+      const olItems = await fetchOLBooks(query)
+      if (olItems.length > 0) {
+        const gbTitles = new Set(filtered.map((i: Record<string, unknown>) => {
+          const v = i.volumeInfo as Record<string, unknown>
+          return ((v.title as string) || '').toLowerCase()
+        }))
+        const newOl = olItems.filter(i => {
+          const v = i.volumeInfo as Record<string, unknown>
+          return !gbTitles.has(((v.title as string) || '').toLowerCase())
+        })
+        itemsToProcess = [...filtered, ...newOl].slice(0, 5)
+      }
+    }
+
+    if (!itemsToProcess.length) {
       return new Response(
         JSON.stringify({ books: [], source: 'google_books' }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -184,7 +252,7 @@ serve(async (req) => {
 
     // ── 3. Resolve cada resultado em paralelo ─────────────────────
     const raw = (await Promise.all(
-      filtered.slice(0, 5).map(async (item: Record<string, unknown>) => {
+      itemsToProcess.map(async (item: Record<string, unknown>) => {
         try {
           const v = item.volumeInfo as Record<string, unknown>
           const identifiers = v.industryIdentifiers as { type: string; identifier: string }[] | undefined
@@ -207,8 +275,8 @@ serve(async (req) => {
           }
 
           if (isbn) {
-            // a. Fetch ol_work_id via Open Library ─────────────────
-            const workId = await fetchOLWorkId(isbn)
+            // a. Fetch ol_work_id — usa pre-resolvido para itens OL, senão busca via ISBN
+            const workId = (item._ol_work_id as string | null) ?? await fetchOLWorkId(isbn)
 
             if (workId) {
               // b. Busca por ol_work_id ──────────────────────────────
@@ -264,17 +332,18 @@ serve(async (req) => {
             }
           }
 
-          // Sem ISBN: insere direto ────────────────────────────────
+          // Sem ISBN: insere direto (ol_work_id pode vir de item OL) ─
+          const noIsbnWorkId = (item._ol_work_id as string | null) || null
           const { data: inserted } = await supabase
             .from('dim_books')
-            .insert(bookData)
+            .insert({ ...bookData, ol_work_id: noIsbnWorkId })
             .select('id')
             .single()
 
           return {
             id:            (inserted?.id as string) || `gb-${item.id as string}`,
             dim_book_id:   (inserted?.id as string) || null,
-            ol_work_id:    null,
+            ol_work_id:    noIsbnWorkId,
             title:         bookData.title,
             author:        bookData.author,
             year:          bookData.year,

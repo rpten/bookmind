@@ -606,48 +606,7 @@ function SearchTab({ books, onSelect, onAdd }) {
   const [query, setQuery]       = useState("");
   const [results, setResults]   = useState([]);
   const [compats, setCompats]   = useState({});
-  const [sheet, setSheet]       = useState(null);
   const [searchLoading, setSearchLoading] = useState(false);
-
-  // ── Registration modal state ──────────────────────────────────
-  const [regBook,    setRegBook]    = useState(null);
-  const [regStatus,  setRegStatus]  = useState("lido");
-  const [regImpact,  setRegImpact]  = useState(0);
-  const [regEmocoes, setRegEmocoes] = useState([]);
-  const [regPhrase,  setRegPhrase]  = useState("");
-  const [regMoment,  setRegMoment]  = useState("");
-
-  function openRegister(book, status = "lido") {
-    setSheet(null);
-    setRegBook(book);
-    setRegStatus(status);
-    setRegImpact(0);
-    setRegEmocoes([]);
-    setRegPhrase("");
-    setRegMoment("");
-  }
-
-  function toggleEmo(e) {
-    setRegEmocoes(prev => prev.includes(e) ? prev.filter(x => x !== e) : [...prev, e]);
-  }
-
-  function handleSave() {
-    onAdd({
-      title:       regBook.title,
-      author:      regBook.author,
-      year:        regBook.year,
-      dim_book_id: regBook.dim_book_id || null,
-      status:      regStatus,
-      dateRead:    regStatus === "lido" ? new Date().toISOString().split("T")[0] : null,
-      impact:      regStatus === "lido" ? (regImpact || null) : null,
-      phrase:      regPhrase  || null,
-      moment:      regMoment  || null,
-      checkboxes:   regEmocoes.length > 0 ? { emoção: regEmocoes } : {},
-      provocations: [],
-      themes:       [],
-    });
-    setRegBook(null);
-  }
 
   async function computeCompats(searchResults) {
     if (books.length < 3) { setCompats({}); return; }
@@ -729,10 +688,12 @@ function SearchTab({ books, onSelect, onAdd }) {
         title: book.title,
         author: book.author,
         year: book.year?.toString() || 'N/A',
-        synopsis: book.synopsis || 'Sem sinopse disponível',
+        synopsis: book.synopsis || null,
         cover_url: book.cover_url,
         isbn: book.isbn || null,
         genres: book.genres || [],
+        avg_rating: book.avg_rating || null,
+        ratings_count: book.ratings_count || null,
       }));
 
       setResults(formattedResults);
@@ -767,7 +728,7 @@ function SearchTab({ books, onSelect, onAdd }) {
       )}
 
       {results.map((book,i) => (
-        <div key={book.id} onClick={()=>setSheet(book)} style={{ display:"flex", alignItems:"center", gap:14, padding:"13px 0", borderBottom:`1px solid ${P.bdr}`, cursor:"pointer" }}>
+        <div key={book.id} onClick={()=>onSelect(book)} style={{ display:"flex", alignItems:"center", gap:14, padding:"13px 0", borderBottom:`1px solid ${P.bdr}`, cursor:"pointer" }}>
           {book.cover_url ? (
             <img src={book.cover_url} alt={book.title} style={{ width:42, height:60, borderRadius:10, objectFit:"cover", flexShrink:0 }} />
           ) : (
@@ -783,81 +744,6 @@ function SearchTab({ books, onSelect, onAdd }) {
         </div>
       ))}
 
-      {sheet && (
-        <div onClick={()=>setSheet(null)} style={{ position:"fixed", inset:0, zIndex:300, background:"rgba(47,42,36,0.6)", backdropFilter:"blur(8px)", display:"flex", alignItems:"flex-end" }}>
-          <div onClick={e=>e.stopPropagation()} style={{ background:P.bg, borderRadius:"24px 24px 0 0", padding:26, width:"100%", maxHeight:"80vh", overflowY:"auto", animation:"slideUp .3s ease" }}>
-            <div style={{ width:32, height:3, background:P.bdr, borderRadius:2, margin:"0 auto 22px" }}/>
-            <div style={{ fontSize:20, fontWeight:"bold", color:P.text, marginBottom:4 }}>{sheet.title}</div>
-            <div style={{ fontSize:11, color:P.muted, fontFamily:mono, marginBottom:14 }}>{sheet.author} · {sheet.year}</div>
-            <div style={{ fontSize:14, color:P.sub, lineHeight:1.7, marginBottom:20 }}>{sheet.synopsis}</div>
-            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-              <button onClick={() => openRegister(sheet, "lido")} style={{ ...btnAccent(true), height:48 }}>Registrar leitura</button>
-              <button onClick={() => openRegister(sheet, "quero ler")} style={{ ...btnOutline, width:"100%", height:48, textAlign:"center" }}>Adicionar à fila</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {regBook && (
-        <div onClick={() => setRegBook(null)} style={{ position:"fixed", inset:0, zIndex:400, background:"rgba(47,42,36,0.65)", backdropFilter:"blur(8px)", display:"flex", alignItems:"flex-end" }}>
-          <div onClick={e => e.stopPropagation()} style={{ background:P.bg, borderRadius:"24px 24px 0 0", padding:26, width:"100%", maxHeight:"90vh", overflowY:"auto", animation:"slideUp .3s ease" }}>
-            <div style={{ width:32, height:3, background:P.bdr, borderRadius:2, margin:"0 auto 20px" }}/>
-
-            {/* Cabeçalho */}
-            <div style={{ fontSize:16, fontWeight:"bold", color:P.text, marginBottom:2 }}>{regBook.title}</div>
-            <div style={{ fontSize:11, color:P.muted, fontFamily:mono, marginBottom:20 }}>{regBook.author} · {regBook.year}</div>
-
-            {/* Status */}
-            <div style={sectionLabel}>status</div>
-            <div style={{ display:"flex", gap:6, marginBottom:22 }}>
-              {["lido","lendo","quero ler"].map(s => (
-                <button key={s} onClick={() => setRegStatus(s)} style={chip(regStatus === s)}>{s}</button>
-              ))}
-            </div>
-
-            {/* Impacto — só para lido */}
-            {regStatus === "lido" && (
-              <div style={{ marginBottom:22 }}>
-                <div style={sectionLabel}>impacto pessoal</div>
-                <div style={{ display:"flex", gap:6 }}>
-                  {[1,2,3,4,5].map(n => (
-                    <button key={n} onClick={() => setRegImpact(n)} style={{ width:38, height:38, borderRadius:10, fontSize:16, cursor:"pointer", background:regImpact >= n ? P.accentS : "transparent", border:`1px solid ${regImpact >= n ? P.accent : P.bdr}`, color:regImpact >= n ? P.accent : P.muted, transition:"all .15s" }}>★</button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Emoções */}
-            <div style={{ marginBottom:22 }}>
-              <div style={sectionLabel}>emoções evocadas</div>
-              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
-                {Object.entries(EMOCAO_COR).map(([em, cor]) => (
-                  <button key={em} onClick={() => toggleEmo(em)} style={chip(regEmocoes.includes(em), cor)}>
-                    {EMOCAO_EMOJI[em]} {em}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Frase */}
-            <div style={{ marginBottom:14 }}>
-              <div style={sectionLabel}>frase que ficou</div>
-              <input value={regPhrase} onChange={e => setRegPhrase(e.target.value)} placeholder="Uma imagem, sensação ou frase..." style={smallInput} />
-            </div>
-
-            {/* Momento */}
-            <div style={{ marginBottom:28 }}>
-              <div style={sectionLabel}>momento de vida</div>
-              <input value={regMoment} onChange={e => setRegMoment(e.target.value)} placeholder="O que estava acontecendo quando você leu..." style={smallInput} />
-            </div>
-
-            <div style={{ display:"flex", gap:8 }}>
-              <button onClick={handleSave} style={{ ...btnAccent(true), height:52 }}>Salvar ✓</button>
-              <button onClick={() => setRegBook(null)} style={btnOutline}>Cancelar</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
